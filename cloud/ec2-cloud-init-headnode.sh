@@ -1,6 +1,6 @@
 # ec2-cloud-init.txt is inserted here 
 
-dnf install -y openldap-servers 
+dnf install -y openldap-servers rsync
 
 if [[ -d "/etc/redis6" ]]; then
   echo "Config redis"

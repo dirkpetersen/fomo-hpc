@@ -1,7 +1,7 @@
 #! /usr/bin/python3
 
 """
-# csbatch - reads Slurm submission scripts and executes them in AWS EC2
+# csqueue - shows list of jobs in slurm compatible format
 """
 
 class EnvConfig:

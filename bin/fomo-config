@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# Configure FOMO-HPC 
+set -e
+
+if [[ -z "${FOMO_ROOT}" ]]; then
+  FOMO_ROOT="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")"/.. &> /dev/null && pwd)"
+fi
+
+MYUID=$(id -u)
+if [[ ${MYUID} -eq 0 ]]; then
+  echo "Error: This script should not be run as root."
+  exit 1
+fi
+
+create_folders_files() {
+  # create required folder and files 
+  mkdir -p "${FOMO_ROOT}/.work/log"
+}
+
+config_env() {
+
+  # Determine the source file
+  if [[ -f "${FOMO_ROOT}/.env" ]]; then
+    SOURCE_FILE="${FOMO_ROOT}/.env"
+  else
+    SOURCE_FILE="${FOMO_ROOT}/default.env"
+  fi
+  echo -e "\n*** Reading config from ${SOURCE_FILE} ... \n"
+
+  ENV_TMP_FILE="${FOMO_ROOT}/.env.tmp"
+
+  # Empty the temporary file
+  > "${ENV_TMP_FILE}"
+
+  COMMENTS=""
+
+  # Open the source file descriptor
+  exec 3< "${SOURCE_FILE}"
+
+  while IFS= read -r line <&3 || [[ -n "${line}" ]]; do
+    if [[ "${line}" =~ ^#.* ]]; then
+      # Line is a comment; accumulate it
+      COMMENTS="${line}"
+      # Write the comment to the temp file (ensures comments are preserved)
+      echo "${COMMENTS}" >> "${ENV_TMP_FILE}"
+    elif [[ -z "${line}" ]]; then
+      # Empty line; just reset comments and preserve the empty line
+      COMMENTS=""
+      echo "" >> "${ENV_TMP_FILE}"
+    elif [[ "${line}" =~ ^[A-Za-z_][A-Za-z0-9_]*=.* ]]; then
+      # Line is a key-value pair
+      KEY="${line%%=*}"
+      VALUE="${line#*=}"
+      
+      # Evaluate the value to expand variables
+      VALUE=$(eval echo "${VALUE}")
+
+      # Check if the value contains spaces and is not already quoted
+      if [[ "$VALUE" =~ \  ]] && [[ "$VALUE" != \"*\" ]]; then
+        VALUE="\"${VALUE}\""
+      fi
+
+      # Skip FS_SSH* keys if --ssh is not used, but write the comment
+      if [[ "$KEY" == FS_SSH* && "$SSH_CONFIG" == false ]]; then
+        # Write the original line to the file without prompting
+        echo "${KEY}=${VALUE}" >> "${ENV_TMP_FILE}"
+        COMMENTS=""
+        continue
+      fi
+
+      # Show accumulated comments as a caption before prompting
+      if [[ -n "$COMMENTS" ]]; then
+        echo -e "${COMMENTS}"
+      fi      
+
+      # Prompt the user with the default value
+      read -e -i "${VALUE}" -p "Enter or edit ${KEY}: " NEW_VALUE </dev/tty
+
+      # Add an empty line in the terminal after the prompt
+      echo ""
+
+      # Check if the new value contains spaces and is not already quoted
+      if [[ "$NEW_VALUE" =~ \  ]] && [[ "$NEW_VALUE" != \"*\" ]]; then
+        NEW_VALUE="\"${NEW_VALUE}\""
+      fi
+
+      # Write the key-value pair to the temp file
+      echo "${KEY}=${NEW_VALUE}" >> "${ENV_TMP_FILE}"
+
+      # Reset comments
+      COMMENTS=""
+    else
+      # Other lines; write them as-is
+      echo "${line}" >> "${ENV_TMP_FILE}"
+    fi
+  done
+
+  # Close the file descriptor
+  exec 3<&-
+
+  # Replace the original .env file with the new values
+  mv "${ENV_TMP_FILE}" "${FOMO_ROOT}/.env"
+
+  # Export all vars as environment vars
+  set -a  # Automatically export all variables
+  source "${FOMO_ROOT}/.env"
+  set +a  # Disable automatic export
+}
+
+create_folders_files
+config_env
+
+envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init.sh  > "${FOMO_ROOT}/.work/ec2-cloud-init-headnode.txt"
+envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-headnode.sh  >> "${FOMO_ROOT}/.work/ec2-cloud-init-headnode.txt"
+
+envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init.sh  > "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt"
+envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-node.sh  >> "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt"
+
+cp "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt" "${FOMO_ROOT}/.work/ec2-cloud-init-node-template.txt"
+
+echo -e "\n*** Configuration complete. ***\n"

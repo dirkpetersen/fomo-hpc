@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# Configure FOMO-HPC 
+set -e
+
+if [[ -z "${FOMO_ROOT}" ]]; then
+  FOMO_ROOT="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")"/.. &> /dev/null && pwd)"
+fi
+
+MYUID=$(id -u)
+if [[ ${MYUID} -eq 0 ]]; then
+  echo "Error: This script should not be run as root."
+  exit 1
+fi
+
+if [[ -f "${FOMO_ROOT}/.env" ]]; then
+  # Export all vars as environment vars
+  set -a  # Automatically export all variables
+  source "${FOMO_ROOT}/.env"
+  set +a  # Disable automatic export
+else
+  echo "Run fomo-config before running this script."
+  exit 1
+fi
+
+
+# envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-headnode.sh  >> "${FOMO_ROOT}/.work/ec2-cloud-init-headnode.txt"
+
+echo -e "\n*** Preparation complete. ***\n"
