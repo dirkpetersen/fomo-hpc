@@ -23,7 +23,22 @@ else
   exit 1
 fi
 
-${FOMO_ROOT}/utils/get-packages-to-install.sh >> "${FOMO_ROOT}/.work/ec2-cloud-init-node-template.txt"
+${FOMO_ROOT}/utils/get-packages-to-install.sh | tee -e "${FOMO_ROOT}/.work/ec2-cloud-init-node-template.txt"
+
+
+#after template deployed, create a new AMI from the instance
+
+# aws ec2 create-image \
+#     --instance-id <instance-id> \
+#     --name "MyNewAMI" \
+#     --description "AMI with installed RPM packages" \
+#     --no-reboot
+
+#After running the command, AWS will start creating the AMI. To track its progress, you can use:
+# aws ec2 describe-images --image-ids <ami-id>
+
+# aws ec2 describe-images --owners self
+
 
 # envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-headnode.sh  >> "${FOMO_ROOT}/.work/ec2-cloud-init-headnode.txt"
 

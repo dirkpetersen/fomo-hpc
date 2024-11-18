@@ -1,0 +1,740 @@
+#!/bin/bash
+
+# Quickly deploy ec2 instance after answering a few questions
+
+# Define constants that can be overridden by environment variables
+
+# Set EC2_KEY_NAME and EC2_KEY_FILE
+: "${ACCEPT_DEFAULTS:="false"}"
+: "${EC2_SECURITY_GROUP:="SSH-HTTP-ICMP"}"
+: "${AWS_DEFAULT_REGION:=$(aws configure get region)}"
+: "${AWS_REGION:=${AWS_DEFAULT_REGION}}"
+: "${AWS_AZ:=""}"  # Empty string means no specific AZ
+# These variables will be set after check_aws() is called
+# EC2_KEY_NAME=""
+# EC2_KEY_FILE=""
+
+function list_instances() {
+    aws ec2 describe-instances \
+        --region ${AWS_REGION} \
+        --query 'Reservations[*].Instances[*].[InstanceId, Tags[?Key==`Name`].Value | [0], PublicDnsName]' \
+        --filters "Name=instance-state-name,Values=running" \
+        --output table
+}
+
+function terminate_instance() {
+    local instance_id=$1
+    if aws ec2 terminate-instances --region ${AWS_REGION} --instance-ids ${instance_id}; then
+        echo "Instance ${instance_id} termination request sent."
+    else
+        echo "Failed to terminate instance ${instance_id}."
+    fi
+}
+
+function prompt() {
+  # usage:  prompt NEW_VAR "Prompt message" ["${PROMPT_DEFAULT_VALUE}"]
+  local __resultvar=$1
+  local __prompt=$2
+  local __default=${3:-}
+  local __result
+  if [[ "$ACCEPT_DEFAULTS" = true ]]; then
+    __result="$__default"
+  else
+    read -e -i "$__default" -p "$__prompt: " __result
+  fi
+  eval $__resultvar="'$__result'"
+}
+
+function check_aws() {
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "AWS CLI is not installed. Installing..."
+    tmpdir=$(mktemp -d -t awscli-XXX)
+
+    # Download, unzip, and install AWS CLI v2 using full paths
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "$tmpdir/awscliv2.zip" \
+      && unzip "$tmpdir/awscliv2.zip" -d "$tmpdir" \
+      && "$tmpdir/aws/install" -i ~/.local/share/aws-cli -b ~/.local/bin
+     # Clean up by removing the temporary directory
+    rm -rf "$tmpdir"
+    export PATH=~/.local/bin:$PATH
+  fi
+  
+  # Attempt to retrieve AWS identity information
+  identity_info=$(aws sts get-caller-identity --query '[Account, Arn]' --output text 2>/dev/null)
+  # Check if the command succeeded
+  if [ $? -ne 0 ]; then
+      echo "Error: AWS CLI is not authenticated. Executing 'aws sso login --no-browser' or set up your credentials."
+      aws sso login --no-browser
+      exit 1
+  fi
+  # Extract the account ID and the username/role name if the command succeeded
+  AWSACCOUNT=$(echo "$identity_info" | awk '{print $1}')
+  AWSUSER=$(echo "$identity_info" | awk '{print $2}' | awk -F'/' '{print $NF}')
+  AWSUSER2="${AWSUSER%@*}"
+
+  # Set EC2_KEY_NAME and EC2_KEY_FILE
+  : "${EC2_KEY_NAME:="auto-ec2-${AWSUSER}"}"
+  : "${EC2_KEY_FILE:="~/.ssh/auto-ec2-${AWSACCOUNT}-${AWSUSER2}.pem"}"
+  EC2_KEY_FILE=$(eval echo "${EC2_KEY_FILE}")
+
+  setup_ec2_key
+}
+
+key_pair_exists() {
+  local region="${AWS_REGION}"
+  if [[ -n "${1}" ]]; then
+    region="${1}"
+  fi
+  aws ec2 describe-key-pairs \
+    --region "${region}" \
+    --key-names "${EC2_KEY_NAME}" \
+    --query "KeyPairs[?KeyName=='${EC2_KEY_NAME}']" \
+    --output text > /dev/null 2>&1
+  if [[ $? -eq 0 ]]; then
+    return 0
+  else
+    return 1  
+  fi
+}
+
+function setup_ec2_key() {
+  if key_pair_exists; then
+    if [[ ! -f "${EC2_KEY_FILE}" ]]; then
+      echo "EC2 Key pair ${EC2_KEY_NAME} is setup in your AWS account but the associated SSH key file ${EC2_KEY_FILE} does not exist, likely because you used this tool already on a different machine. Please copy the key file from that other machine to ${EC2_KEY_FILE} or delete the key pair in your AWS account and start from scratch. You can also set environment variables EC2_KEY_NAME and EC2_KEY_FILE to use other keys you created before."
+      exit 1
+    fi
+  else
+    if [[ -f "${EC2_KEY_FILE}" ]]; then
+      # import key
+      aws ec2 import-key-pair --region ${AWS_REGION} --key-name "${EC2_KEY_NAME}" --public-key-material "$(base64 "${EC2_KEY_FILE}.pub")"
+      return 0
+    fi
+    read -p "EC2 key ${EC2_KEY_NAME} with file ${EC2_KEY_FILE} does not exist. You can set environment variables EC2_KEY_NAME and EC2_KEY_FILE to use other keys you created before, or create a new key now. Do you want to create a new AWS key? (y/n) " create_key
+    if [[ $create_key =~ ^[Yy]$ ]]; then
+      mkdir -p "$(dirname "${EC2_KEY_FILE}")"
+      aws ec2 create-key-pair --region ${AWS_REGION} --key-name "${EC2_KEY_NAME}" --key-type ed25519 --query 'KeyMaterial' --output text > "${EC2_KEY_FILE}"
+      if ! [[ -f "${EC2_KEY_FILE}" ]]; then 
+        echo "Error: Failed to create EC2 key file. Exiting."
+        exit 1
+      fi
+      chmod 600 "${EC2_KEY_FILE}"
+      ssh-keygen -y -f "${EC2_KEY_FILE}" > "${EC2_KEY_FILE}.pub"
+      chmod 600 "${EC2_KEY_FILE}.pub"
+      echo "New EC2 key created and saved to ${EC2_KEY_FILE}"
+    else
+      echo "EC2 key file not found and not created. Exiting."
+      exit 1
+    fi
+  fi
+}
+
+
+# Function to set EC2_USER and EC2_AMI_OWNER based on AMI_NAME
+function set_ec2_user_and_owner() {
+  local os_lower=$(echo "$OS" | tr '[:upper:]' '[:lower:]')
+  if [[ $os_lower == *"al202"* ]]; then
+    EC2_USER="ec2-user"
+    EC2_AMI_OWNER="137112412989"
+  elif [[ $os_lower == *"ubuntu"* ]]; then
+    EC2_USER="ubuntu"
+    EC2_AMI_OWNER="099720109477" 
+  elif [[ $os_lower == *"rocky"* ]]; then
+    EC2_USER="rocky"
+    EC2_AMI_OWNER="792107900819" # Rocky's owner ID
+  else
+    echo "Error: Unsupported AMI name. Please use 'Amazon Linux' ,'Ubuntu' or 'Rocky'"
+    exit 1
+  fi
+}
+
+function find_instance_type() {
+  if [[ "$INSTTYPE" != "any" ]]; then
+    EC2_TYPE="$INSTTYPE"
+    echo "Using specified instance type: $EC2_TYPE"
+  else
+    local instance_types
+    local filtered_types
+    local query
+
+    # Base query for CPU and Memory
+    query="InstanceTypes[?to_number(VCpuInfo.DefaultVCpus) >= \`${VCPUS}\` && to_number(MemoryInfo.SizeInMiB) >= \`${MEM_MB}\`"
+
+    # Add CPU architecture if needed
+    if [[ "${ARCH}" == "x86" || "${ARCH}" == "amd64" ]]; then ARCH="x86_64"; fi
+    if [[ "${ARCH}" == "arm" || "${ARCH}" == "graviton" ]]; then ARCH="arm64"; fi
+      
+    if [[ "${ARCH}" == "arm64" || "${ARCH}" == "x86_64" ]]; then
+      query="${query} && ProcessorInfo.SupportedArchitectures[?contains(@, '${ARCH}')]"
+    fi
+
+    # Add GPU requirement if needed
+    if [[ "${GPUS}" -gt 0 ]]; then
+      if [[ "$GPU_MODEL" = "any" ]]; then
+        query="${query} && (to_number(GpuInfo.Gpus[?Manufacturer=='NVIDIA'].Count | [0]) >= \`${GPUS}\`)"
+        if [[ -n "${GPU_VRAM}" ]]; then
+          query="${query} && (to_number(GpuInfo.Gpus[?Manufacturer=='NVIDIA'].MemoryInfo.SizeInMiB | [0]) >= \`$((GPU_VRAM * 1024))\`)"
+        fi
+      else
+        query="${query} && (to_number(GpuInfo.Gpus[?Manufacturer=='NVIDIA' && Name=='${GPU_MODEL}'].Count | [0]) >= \`${GPUS}\`)"
+      fi
+    fi
+
+    # Add ephemeral disk requirement if needed
+    if [[ "${EPHEMERAL_SIZE}" -gt 0 ]]; then    
+      query="${query} && (not_null(InstanceStorageInfo) && InstanceStorageInfo.TotalSizeInGB >= \`${EPHEMERAL_SIZE}\`)"
+    fi
+
+    # Close last bracket
+    query="${query}]"
+
+    # echo "$query" > ec2_query.txt
+    # exit 1
+
+    instance_types=$(aws ec2 describe-instance-types \
+      --region ${AWS_REGION} \
+      --query "${query}" \
+      --output json)
+
+    # echo "$instance_types" > ec2_instance_types.json 
+
+    if [[ -z "$instance_types" || "$instance_types" == "[]" ]]; then
+      echo "No instance types found matching the criteria. Defaulting to t3.small."
+      EC2_TYPE="t3.small"
+    else
+      # Sort by vCPUs (ascending), then by memory (ascending), then by price (ascending)
+      if [[ "${GPUS}" -gt 0 ]]; then
+        filtered_types=$(echo ${instance_types} | jq -r 'sort_by(.VCpuInfo.DefaultVCpus, .MemoryInfo.SizeInMiB) | map(select(.GpuInfo.Gpus != null)) | sort_by(.GpuInfo.Gpus[0].MemoryInfo.SizeInMiB) | .[0].InstanceType // empty')
+      else
+        filtered_types=$(echo ${instance_types} | jq -r 'sort_by(.VCpuInfo.DefaultVCpus, .MemoryInfo.SizeInMiB) | .[0].InstanceType // empty')
+      fi
+      
+      if [[ -n ${filtered_types} ]]; then
+        echo "Instance type found: ${filtered_types}"
+        EC2_TYPE=${filtered_types}
+      else
+        echo "No suitable instance type found after filtering. Defaulting to t3.small."
+        EC2_TYPE="t3.small"
+      fi
+    fi
+  fi
+
+  # Query additional information about the selected instance type
+  instance_info=$(aws ec2 describe-instance-types --instance-types ${EC2_TYPE} --query 'InstanceTypes[0]' --output json)
+  vcpus=$(echo $instance_info | jq -r '.VCpuInfo.DefaultVCpus')
+  memory=$(echo $instance_info | jq -r '.MemoryInfo.SizeInMiB')
+  memory_gb=$(awk "BEGIN {printf \"%.1f\", $memory/1024}")
+  ephemeral=$(echo $instance_info | jq -r '.InstanceStorageInfo.TotalSizeInGB // 0')
+  gpu_info=$(echo $instance_info | jq -r '.GpuInfo.Gpus[0].Name // "N/A"')
+  gpu_vram=$(echo $instance_info | jq -r '.GpuInfo.Gpus[0].MemoryInfo.SizeInMiB // 0')
+  gpu_vram_gb=$(awk "BEGIN {printf \"%.1f\", $gpu_vram/1024}")
+  ARCH=$(echo $instance_info | jq -r '.ProcessorInfo.SupportedArchitectures[0]')
+
+  # Costs are unreliable ,review later 
+  price=$(aws pricing get-products --service-code AmazonEC2 --filters "Type=TERM_MATCH,Field=instanceType,Value=${EC2_TYPE}" "Type=TERM_MATCH,Field=operatingSystem,Value=Linux" "Type=TERM_MATCH,Field=preInstalledSw,Value=NA" "Type=TERM_MATCH,Field=location,Value=US West (Oregon)" --region us-east-1 | jq -r '.PriceList[0] | fromjson | .terms.OnDemand[].priceDimensions[].pricePerUnit.USD')
+  # Check if the input is a valid number and not zero
+  if [[ "$price" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && [[ $(awk "BEGIN {print ($price != 0)}") -eq 1 ]]; then
+    # Convert to 4 decimal places
+    price=$(printf "%.4f" "$price")
+    price=", $ ${price}/h"
+  else
+    # Set to an empty string
+    price=""
+  fi
+
+  echo "Selected instance type: ${EC2_TYPE} (Architecture: ${ARCH}, vCPUs: ${vcpus}, Mem: ${memory_gb} GB, Ephemeral: ${ephemeral} GB, GPU: ${gpu_info} (${gpu_vram_gb} GB)${price})"
+}
+
+function find_ami_image() {
+  local images
+  local query="sort_by(Images, &CreationDate)[-1].{Id:ImageId,Name:Name}"
+  
+  echo "Searching for AMI with OS: ${OS}, Architecture: ${ARCH}"
+
+  images=$(aws ec2 describe-images \
+    --region ${AWS_REGION} \
+    --owners ${EC2_AMI_OWNER} \
+    --filters "Name=name,Values=${OS}" "Name=architecture,Values=${ARCH}" \
+    --query "${query}" \
+    --output json)
+
+  # echo "aws ec2 describe-images --region ${AWS_REGION} --owners ${EC2_AMI_OWNER} --filters \"Name=name,Values=*${OS}*\" \"Name=architecture,Values=${ARCH}\" --query \"${query}\" --output json"
+  # echo "General AMI search result: ${images}"
+
+  if [[ "${#images}" -lt 30 ]]; then 
+    echo "No suitable AMI image found."
+    exit 1
+  elif [[ -n ${images} && ${images} != "null" ]]; then
+    AMI_IMAGE=$(echo ${images} | jq -r '.Id')
+    AMI_NAME=$(echo ${images} | jq -r '.Name')
+    echo "AMI Image found: ${AMI_IMAGE} (${AMI_NAME})"
+  else
+    echo "No suitable AMI image found."
+    exit 1
+  fi
+
+}
+
+# Get user's IP address
+function get_user_ip() {
+  IP=$(curl -s https://checkip.amazonaws.com)
+  echo "Your IP address is: ${IP}. SSH access of your instance will be restricted to this IP."
+}
+
+function configure_security_group() {
+  # Check if the security group already exists
+  existing_sg=$(aws ec2 describe-security-groups \
+    --region ${AWS_REGION} \
+    --filters "Name=group-name,Values=${EC2_SECURITY_GROUP}" \
+    --query 'SecurityGroups[0].GroupId' \
+    --output text)
+
+  if [ "$existing_sg" != "None" ] && [ -n "$existing_sg" ]; then
+    echo "Using existing security group: ${existing_sg}"
+    sg_id=$existing_sg
+  else
+    echo "Creating new security group"
+    sg_id=$(aws ec2 create-security-group \
+      --region ${AWS_REGION} \
+      --group-name ${EC2_SECURITY_GROUP} \
+      --description "Security group for EC2 instance" \
+      --query 'GroupId' --output text)
+
+    # Add ingress rules only for newly created security group
+    aws ec2 authorize-security-group-ingress --region ${AWS_REGION} \
+      --group-id ${sg_id} --protocol tcp --port 22 --cidr ${IP}/32
+    aws ec2 authorize-security-group-ingress --region ${AWS_REGION} \
+      --group-id ${sg_id} --protocol tcp --port 80 --cidr 0.0.0.0/0
+    aws ec2 authorize-security-group-ingress --region ${AWS_REGION} \
+      --group-id ${sg_id} --protocol tcp --port 443 --cidr 0.0.0.0/0
+    aws ec2 authorize-security-group-ingress --region ${AWS_REGION} \
+      --group-id ${sg_id} --protocol icmp --port -1 --cidr 0.0.0.0/0
+  fi
+}
+
+function launch_instance() {
+  # Check for ec2-cloud-init.txt file
+  cloud_init_file="ec2-cloud-init.txt"
+  SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" &> /dev/null && pwd)"
+  if [[ -f "./${cloud_init_file}" ]]; then
+    cloud_init_path="${cloud_init_file}"
+  elif [[ -f "${SCRIPT_DIR}/${cloud_init_file}" ]]; then
+    cloud_init_path="${SCRIPT_DIR}/${cloud_init_file}"
+  else
+    echo "WARNING: ${cloud_init_file} script not found. Instance will be launched without user data."
+  fi
+  userdata=""
+  if [[ -n "$cloud_init_path" ]]; then  
+    userdata="--user-data file://${cloud_init_path}"
+    echo "Using cloud-init script from $cloud_init_path"
+  fi
+
+  # Construct block device mapping JSON
+  BLK_DEV_JSON="["
+  if [[ $EBS_SIZE -gt 0 ]]; then
+      BLK_DEV_JSON+="{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${EBS_SIZE}}}"
+  fi
+  if [[ $EPHEMERAL_SIZE -gt 0 ]]; then
+      [[ $EBS_SIZE -gt 0 ]] && BLK_DEV_JSON+=","
+      BLK_DEV_JSON+="{\"DeviceName\":\"/dev/sdb\",\"VirtualName\":\"ephemeral0\"}"
+  fi
+  BLK_DEV_JSON+="]"
+
+  # Add availability zone parameter if specified
+  az_param=""
+  if [[ -n "${AWS_AZ}" ]]; then
+    az_param="--placement AvailabilityZone=${AWS_AZ}"
+    echo "Using specified availability zone: ${AWS_AZ}"
+  fi
+
+  launch_output=$(
+    aws ec2 run-instances --region ${AWS_REGION} \
+    --image-id ${AMI_IMAGE} \
+    --count 1 \
+    --instance-type ${EC2_TYPE} \
+    --key-name ${EC2_KEY_NAME} \
+    --security-group-ids ${sg_id} \
+    --block-device-mappings "${BLK_DEV_JSON}" \
+    ${userdata} \
+    ${az_param} \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${NAME}}]" \
+    --query 'Instances[0].{InstanceId:InstanceId,AvailabilityZone:Placement.AvailabilityZone}' \
+    --output json
+  )
+
+  if [[ -z "$launch_output" ]]; then
+    echo "Error: Failed to launch instance. Check your AWS credentials and permissions."
+    exit 1
+  fi
+
+  # Extract instance ID and AZ from the JSON response
+  instance_id=$(echo "$launch_output" | jq -r '.InstanceId')
+  az=$(echo "$launch_output" | jq -r '.AvailabilityZone')
+  
+  if [[ -z "$instance_id" || "$instance_id" == "null" ]]; then
+    echo "Error: Failed to create instance. $launch_output"
+    exit 1
+  fi
+
+  echo "Instance launched in availability zone: ${az}"
+  
+  # Set INSTANCE_INFO to just the instance ID for compatibility with the rest of the script
+  INSTANCE_INFO="$instance_id"
+}
+
+function register_dns() {
+  # Check for Route 53 hosted zone and register DNS if available
+  hosted_zone_id=$(aws route53 list-hosted-zones --query 'HostedZones[0].Id' --output text)
+  if [[ -n "$hosted_zone_id" && "$hosted_zone_id" != "None" ]]; then
+    domain_name=$(aws route53 get-hosted-zone --id $hosted_zone_id --query 'HostedZone.Name' --output text)
+    domain_name=${domain_name%%.} # Remove trailing dot
+    fqdn="${NAME}.${domain_name}"
+    
+    # Store hosted_zone_id and fqdn as global variables
+    export HOSTED_ZONE_ID=$hosted_zone_id
+    export FQDN=$fqdn
+    
+    # Create Route 53 DNS record
+    change_batch=$(cat <<EOF
+{
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "${fqdn}",
+        "Type": "A",
+        "TTL": 300,
+        "ResourceRecords": [
+          {
+            "Value": "${public_ip}"
+          }
+        ]
+      }
+    }
+  ]
+}
+EOF
+)
+
+    if aws route53 change-resource-record-sets --hosted-zone-id $hosted_zone_id --change-batch "$change_batch" > /dev/null; then
+      echo "DNS record created: ${fqdn}"
+      public_dns_name=$fqdn
+    else
+      echo "Failed to create DNS record. Using public DNS name."
+    fi
+  else
+    echo "No Route 53 hosted zone found. Using public DNS name."
+  fi
+}
+
+function wait_for_instance() {
+  echo "Waiting for instance to be ready..."
+  local max_attempts=30
+  local attempt=0
+  while [ $attempt -lt $max_attempts ]; do
+      instance_info=$(aws ec2 describe-instances --region ${AWS_REGION} --instance-ids $instance_id \
+          --query 'Reservations[0].Instances[0].{State:State.Name,PublicIpAddress:PublicIpAddress,InstanceType:InstanceType}' \
+          --output json 2>/dev/null)
+      
+      if [[ $? -eq 0 ]]; then
+          state=$(echo $instance_info | jq -r '.State')
+          public_ip=$(echo $instance_info | jq -r '.PublicIpAddress')
+          instance_type=$(echo $instance_info | jq -r '.InstanceType')
+          
+          if [[ "$state" = "running" && "$public_ip" != "null" && -n "$public_ip" ]]; then
+              echo "Instance is ready. Public IP: $public_ip"
+              break
+          fi
+      fi
+      
+      echo "Waiting for instance to be ready... (Attempt $((attempt+1))/$max_attempts)"
+      sleep 10
+      attempt=$((attempt+1))
+  done
+
+  if [[ $attempt -eq $max_attempts ]]; then
+      echo "Error: Instance did not become ready within the expected time."
+      exit 1
+  fi
+
+  echo "Waiting for SSH to become available..."
+  max_ssh_attempts=30
+  ssh_attempt=0
+  sshout=$(mktemp -t ec2-XXX)
+  while [ $ssh_attempt -lt $max_ssh_attempts ]; do
+      if ssh -i "${EC2_KEY_FILE}" -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no ${EC2_USER}@${public_ip} exit 2>${sshout}; then
+          echo "SSH is now available."
+          return 0
+      fi
+      printf "Debug: " && cat $sshout
+      echo "Waiting for SSH... (Attempt $((ssh_attempt+1))/$max_ssh_attempts)"
+      sleep 10
+      ssh_attempt=$((ssh_attempt+1))
+  done
+
+  echo "Error: SSH did not become available within the expected time."
+  exit 1
+}
+
+
+#########################################################################################################
+### Main script ####
+
+check_aws
+
+# Check for command line arguments
+if [[ "$1" = "list" ]]; then
+    list_instances
+    exit 0
+elif [[ "$1" = "term" || "$1" = "terminate" || "$1" = "kill" ]]; then
+    if [[ -z "$2" ]]; then
+        echo "Error: Instance ID is required for termination."
+        echo "Usage: $0 term <instance-id>"
+        exit 1
+    fi
+    echo "Attempting to terminate instance $2..."
+    terminate_instance "$2"
+    exit 0
+elif [[ -f "$1" ]]; then
+    # Function to upload and execute file
+    upload_and_execute() {
+        local file="$1"
+        local remote_file="/tmp/$(basename "$file")"
+        if ! scp -i "${EC2_KEY_FILE}" -o StrictHostKeyChecking=no "$file" "${EC2_USER}@${public_ip}:$remote_file"; then
+            echo "Error: Failed to upload file."
+            return 1
+        fi
+        if [[ $(head -n 1 "$file" | grep -c '^#!') -eq 1 ]]; then
+            if ! ssh -i "${EC2_KEY_FILE}" -o StrictHostKeyChecking=no "${EC2_USER}@${public_ip}" "chmod +x $remote_file && nohup $remote_file > /dev/null 2>&1 &"; then
+                echo "Error: Failed to execute file."
+                return 1
+            fi
+        else
+            if ! ssh -i "${EC2_KEY_FILE}" -o StrictHostKeyChecking=no "${EC2_USER}@${public_ip}" "nohup bash $remote_file > /dev/null 2>&1 &"; then
+                echo "Error: Failed to execute file."
+                return 1
+            fi
+        fi
+        echo "File uploaded and executed in the background."
+        return 0
+    }
+
+    # Set default values for instance creation
+    VCPUS=2
+    ARCH="arm64"
+    MEMORY=1
+    MEM_MB=$((MEMORY * 1024))
+    EBS_SIZE=25
+    EPHEMERAL_SIZE=0
+    GPUS=0
+    OS="al202*-ami-*"
+    NAME="server-x"
+
+    # Setup required dependencies 
+    set_ec2_user_and_owner
+    get_user_ip
+    configure_security_group    
+    find_instance_type
+    find_ami_image
+
+    # Launch instance
+    launch_instance
+
+    # Check if INSTANCE_INFO starts with "i-"
+    if [[ ${INSTANCE_INFO} == i-* ]]; then
+        instance_id=${INSTANCE_INFO}
+    else
+        echo "Error: Failed to create instance. $INSTANCE_INFO"
+        exit 1
+    fi
+    echo "Instance $instance_id is starting. Waiting for public IP..."
+
+    # Wait for the instance to be ready and SSH to be available
+    wait_for_instance
+
+    # Now upload and execute the file
+    if upload_and_execute "$1"; then
+        echo "File uploaded and executed successfully."
+    else
+        echo "Error: Failed to upload or execute file."
+    fi
+    exit 0
+fi
+
+# User Inputs
+if [[ "$ACCEPT_DEFAULTS" = false ]]; then
+    echo -e "\n* What does your EC2 instance need?\n"
+    prompt INSTTYPE "Instance Type (or 'any' to pick CPU, Mem, etc)" "any"
+    if [[ "$INSTTYPE" == "any" ]]; then
+        prompt ARCH "CPU type (arm, x86 or any)" "any"
+        prompt VCPUS "Number of VCPUs" "2"
+        prompt MEMORY "Memory (GB)" "1"
+        prompt EPHEMERAL_SIZE "Ephemeral (local) Disk Size (GB)" "0"
+        prompt GPUS "Number of NVIDIA GPUs" "0"
+        if [[ "$GPUS" -gt 0 ]]; then
+            echo "  Fetching available GPU models..."
+            GPU_MODELS=$(aws ec2 describe-instance-types --query 'InstanceTypes[*].GpuInfo.Gpus[?Manufacturer==`NVIDIA`].Name' --output json | jq -r 'flatten | unique | join(",")')
+            prompt GPU_MODEL "GPU Model (${GPU_MODELS} or any)" "any"
+            if [ "$GPU_MODEL" = "any" ]; then
+                prompt GPU_VRAM "GPU VRAM (GB)" "8"
+            fi
+        fi
+    else
+        EC2_TYPE="$INSTTYPE"
+    fi
+    prompt EBS_SIZE "EBS Volume Size (GB)" "25"
+    echo "  Amazon Linux (default) or enter *ubuntu-*-24.04-*-server* or Rocky-9-EC2-Base* :"
+    prompt OS "Operating System" "al202*-ami-*"
+    prompt AWS_REGION "AWS Region" ${AWS_DEFAULT_REGION}
+    rnd=$((RANDOM % 900 + 100))
+    prompt NAME "Instance/Host Name" "server-${rnd}"
+else
+    echo ""
+    echo "Using default values for all inputs:"
+    echo "INSTTYPE: any"
+    echo "VCPUS: $VCPUS"
+    echo "ARCH: $ARCH"
+    echo "MEMORY: $MEMORY GB"
+    echo "EBS_SIZE: $EBS_SIZE GB"
+    echo "EPHEMERAL_SIZE: $EPHEMERAL_SIZE GB"
+    echo "GPUS: $GPUS"
+    if [[ "$GPUS" -gt 0 ]]; then
+        echo "GPU_VRAM: $GPU_VRAM GB"
+    fi
+    echo "OS: $OS"
+    echo "AWS_REGION: $AWS_REGION"
+    echo "NAME: $NAME"
+    echo ""
+fi
+
+if [[ ${AWS_DEFAULT_REGION} != ${AWS_REGION} ]]; then
+  setup_ec2_key
+fi
+
+VCPUS=$((VCPUS))
+MEM_MB=$((MEMORY * 1024))
+EBS_SIZE=$((EBS_SIZE))
+EPHEMERAL_SIZE=$((EPHEMERAL_SIZE))
+if [[ "$EPHEMERAL_SIZE" -lt 0 ]]; then
+    echo "Error: Ephemeral disk size cannot be negative. Setting to 0."
+    EPHEMERAL_SIZE=0
+fi
+GPUS=$((GPUS))
+AMI_NAME=""
+
+# Setup required dependencies 
+set_ec2_user_and_owner
+get_user_ip
+configure_security_group
+find_instance_type
+find_ami_image
+
+launch_instance
+
+echo "EC2_TYPE: $EC2_TYPE"
+echo "AMI_IMAGE: $AMI_IMAGE"
+echo "AMI_NAME: $AMI_NAME"
+echo "EC2_USER: $EC2_USER"  
+
+# Check if INSTANCE_INFO starts with "i-"
+if [[ ${INSTANCE_INFO} == i-* ]]; then
+    instance_id=${INSTANCE_INFO}
+else
+    echo "Error: Failed to create instance. $INSTANCE_INFO"
+    exit 1
+fi
+echo "Instance $instance_id is starting. Waiting for public IP..."
+
+# Initial delay to allow instance to initialize
+sleep 3
+
+# Wait for the instance to be in the "running" state and have a public IP
+max_attempts=30
+attempt=0
+while [ $attempt -lt $max_attempts ]; do
+  instance_info=$(aws ec2 describe-instances --region ${AWS_REGION} --instance-ids $instance_id \
+    --query 'Reservations[0].Instances[0].{State:State.Name,PublicIpAddress:PublicIpAddress,InstanceType:InstanceType}' \
+    --output json 2>/dev/null)
+  
+  if [[ $? -eq 0 ]]; then
+    state=$(echo $instance_info | jq -r '.State')
+    public_ip=$(echo $instance_info | jq -r '.PublicIpAddress')
+    instance_type=$(echo $instance_info | jq -r '.InstanceType')
+    
+    if [[ "$state" = "running" && "$public_ip" != "null" && -n "$public_ip" ]]; then
+      break
+    fi
+  fi
+  
+  echo "Waiting for instance to be ready... (Attempt $((attempt+1))/$max_attempts)"
+  sleep 10
+  attempt=$((attempt+1))
+done
+
+if [[ $attempt -eq $max_attempts ]]; then
+  echo "Error: Instance did not become ready within the expected time."
+  exit 1
+fi
+
+# Register DNS early
+register_dns
+
+echo "Instance $instance_id is running. Waiting for DNS propagation..."
+
+# Wait for DNS propagation
+max_dns_attempts=30
+dns_attempt=0
+dns_propagated=false
+while [ $dns_attempt -lt $max_dns_attempts ]; do
+  # Use AWS CLI to check DNS record
+  dns_check=$(aws route53 test-dns-answer --hosted-zone-id $HOSTED_ZONE_ID --record-name $FQDN --record-type A --query 'RecordData[0]' --output text 2>/dev/null)
+  if [[ "$dns_check" = "$public_ip" ]]; then
+    echo "DNS has propagated ..."
+    sleep 1    
+    dns_propagated=true
+    break
+  fi
+  echo "Waiting for DNS propagation... (Attempt $((dns_attempt+1))/$max_dns_attempts)"
+  sleep 3
+  dns_attempt=$((dns_attempt+1))
+done
+
+if [[ "$dns_propagated" = false ]]; then
+  echo "Warning: DNS propagation is taking longer than expected. We'll proceed using the public IP address."
+  public_dns_name=$public_ip
+fi
+
+echo "Starting ${public_dns_name} (${instance_id}) on ${instance_type} with ${AMI_NAME}"
+echo -e "\nRun one of these SSH commands to connect:"
+FILE2=~${EC2_KEY_FILE#"$HOME"}
+SSH_COMMAND="ssh -i ${FILE2} ${EC2_USER}@${public_dns_name}"
+echo "$SSH_COMMAND"
+history -a
+echo "$SSH_COMMAND" >> ~/.bash_history
+history -r
+echo "ssh -i ${FILE2} ${EC2_USER}@${public_ip}"
+
+echo -e "\nWaiting for SSH to become available..."
+
+# Wait for SSH to become available
+max_ssh_attempts=30
+ssh_attempt=0
+ssh_available=false
+while [ $ssh_attempt -lt $max_ssh_attempts ]; do
+  if ssh -i "${EC2_KEY_FILE}" -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no ${EC2_USER}@${public_ip} exit 2>/dev/null; then
+    echo "SSH is now available."
+    sleep 1
+    ssh_available=true
+    break
+  fi
+  echo "Waiting for SSH... (Attempt $((ssh_attempt+1))/$max_ssh_attempts)"
+  sleep 5
+  ssh_attempt=$((ssh_attempt+1))
+done
+
+if [[ "$ssh_available" = false ]]; then
+  echo "Error: SSH did not become available within the expected time."
+  exit 1
+fi
+
+alias ssh='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+ssh -i ${EC2_KEY_FILE} ${EC2_USER}@${public_ip}

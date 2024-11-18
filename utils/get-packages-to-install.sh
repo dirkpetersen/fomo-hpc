@@ -33,8 +33,8 @@ done <<< "$all_packages"
 counter=0
 packages=""
 
-dnf install -y epel-release
-crb enable
+echo "dnf install -y epel-release"
+echo "crb enable"
 
 while read -r pkg; do
     if [ $counter -eq 0 ]; then
