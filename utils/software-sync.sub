@@ -1,0 +1,9 @@
+#! /bin/bash
+#SBATCH -c 8
+#SBATCH --mem 64G
+#SBATCH -p batch
+#SBATCH -t 1-0
+
+rsync -az -e "ssh -i ~/.ssh/auto-ec2-701747442027-peterdir.pem" \
+   /arc/software/ root@fomohead1.aws.internetchen.de:/opt/arc/software/
+
