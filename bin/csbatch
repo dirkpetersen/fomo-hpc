@@ -4,6 +4,138 @@
 # csbatch - reads Slurm submission scripts and executes them in AWS EC2
 """
 
+import sys
+import argparse
+import re
+
+def not_avail(option):
+    """Inform user that an option is not yet implemented"""
+    print(f"Warning: Option '{option}' is not yet implemented")
+
+def parse_sbatch_directives(filename):
+    """Parse #SBATCH directives from a submission script"""
+    directives = []
+    try:
+        with open(filename, 'r') as f:
+            for line in f:
+                if line.startswith('#SBATCH'):
+                    # Extract the directive without #SBATCH
+                    directive = line.replace('#SBATCH', '').strip()
+                    directives.append(directive)
+                    not_avail(directive)
+    except FileNotFoundError:
+        print(f"Error: Script file '{filename}' not found")
+        sys.exit(1)
+    return directives
+
+def parse_arguments():
+    """Parse command line arguments similar to sbatch"""
+    parser = argparse.ArgumentParser(description='Slurm-compatible batch job submission for AWS EC2')
+    
+    # Script argument
+    parser.add_argument('script', help='Batch script file')
+    
+    # Parallel run options
+    parser.add_argument('-a', '--array', help='job array index values')
+    parser.add_argument('-A', '--account', help='charge job to specified account')
+    parser.add_argument('--bb', help='burst buffer specifications')
+    parser.add_argument('--bbf', help='burst buffer specification file')
+    parser.add_argument('-b', '--begin', help='defer job until HH:MM MM/DD/YY')
+    parser.add_argument('--comment', help='arbitrary comment')
+    parser.add_argument('--cpu-freq', help='requested cpu frequency (and governor)')
+    parser.add_argument('-c', '--cpus-per-task', type=int, help='number of cpus required per task')
+    parser.add_argument('-d', '--dependency', help='defer job until condition on jobid is satisfied')
+    parser.add_argument('--deadline', help='remove job if no ending possible before this deadline')
+    parser.add_argument('--delay-boot', type=int, help='delay boot for desired node features')
+    parser.add_argument('-D', '--chdir', help='set working directory for batch script')
+    parser.add_argument('-e', '--error', help='file for batch script\'s standard error')
+    parser.add_argument('--export', help='specify environment variables to export')
+    parser.add_argument('--get-user-env', action='store_true', help='load environment from local cluster')
+    parser.add_argument('--gid', help='group ID to run job as (user root only)')
+    parser.add_argument('--gres', help='required generic resources')
+    parser.add_argument('--gres-flags', help='flags related to GRES management')
+    parser.add_argument('-H', '--hold', action='store_true', help='submit job in held state')
+    parser.add_argument('-i', '--input', help='file for batch script\'s standard input')
+    parser.add_argument('-J', '--job-name', help='name of job')
+    parser.add_argument('-k', '--no-kill', action='store_true', help='do not kill job on node failure')
+    parser.add_argument('-L', '--licenses', help='required license, comma separated')
+    parser.add_argument('-M', '--clusters', help='comma separated list of clusters')
+    parser.add_argument('-m', '--distribution', help='distribution method for processes to nodes')
+    parser.add_argument('--mail-type', help='notify on state change: BEGIN, END, FAIL or ALL')
+    parser.add_argument('--mail-user', help='who to send email notification for job state changes')
+    parser.add_argument('--mcs-label', help='mcs label if mcs plugin mcs/group is used')
+    parser.add_argument('-n', '--ntasks', type=int, help='number of tasks to run')
+    parser.add_argument('--nice', help='decrease scheduling priority by value')
+    parser.add_argument('--no-requeue', action='store_true', help='do not permit the job to be requeued')
+    parser.add_argument('--ntasks-per-node', type=int, help='number of tasks to invoke on each node')
+    parser.add_argument('-N', '--nodes', help='number of nodes on which to run (N = min[-max])')
+    parser.add_argument('-o', '--output', help='file for batch script\'s standard output')
+    parser.add_argument('-O', '--overcommit', action='store_true', help='overcommit resources')
+    parser.add_argument('-p', '--partition', help='partition requested')
+    parser.add_argument('--parsable', action='store_true', help='outputs only the jobid and cluster name')
+    parser.add_argument('--power', help='power management options')
+    parser.add_argument('--priority', help='set the priority of the job to value')
+    parser.add_argument('--profile', help='enable acct_gather_profile for detailed data')
+    parser.add_argument('--propagate', help='propagate all [or specific list of] rlimits')
+    parser.add_argument('-q', '--qos', help='quality of service')
+    parser.add_argument('-Q', '--quiet', action='store_true', help='quiet mode (suppress informational messages)')
+    parser.add_argument('--reboot', action='store_true', help='reboot compute nodes before starting job')
+    parser.add_argument('--requeue', action='store_true', help='if set, permit the job to be requeued')
+    parser.add_argument('-s', '--oversubscribe', action='store_true', help='over subscribe resources with other jobs')
+    parser.add_argument('-S', '--core-spec', help='count of reserved cores')
+    parser.add_argument('--signal', help='send signal when time limit within time seconds')
+    parser.add_argument('--spread-job', action='store_true', help='spread job across as many nodes as possible')
+    parser.add_argument('--switches', help='Optimum switches and max time to wait for optimum')
+    parser.add_argument('--thread-spec', help='count of reserved threads')
+    parser.add_argument('-t', '--time', help='time limit')
+    parser.add_argument('--time-min', help='minimum time limit (if distinct)')
+    parser.add_argument('--tres-bind', help='task to tres binding options')
+    parser.add_argument('--tres-per-task', help='list of tres required per task')
+    parser.add_argument('--uid', help='user ID to run job as (user root only)')
+    parser.add_argument('--use-min-nodes', action='store_true', help='prefer the smaller count in a range')
+    parser.add_argument('-v', '--verbose', action='count', default=0, help='verbose mode')
+    parser.add_argument('-W', '--wait', action='store_true', help='wait for completion of submitted job')
+    parser.add_argument('--wckey', help='wckey to run job under')
+    parser.add_argument('--wrap', help='wrap command string in a sh script and submit')
+
+    # Constraint options
+    parser.add_argument('--cluster-constraint', help='specify a list of cluster constraints')
+    parser.add_argument('--contiguous', action='store_true', help='demand a contiguous range of nodes')
+    parser.add_argument('-C', '--constraint', help='specify a list of constraints')
+    parser.add_argument('-F', '--nodefile', help='request a specific list of hosts')
+    parser.add_argument('--mem', help='minimum amount of real memory')
+    parser.add_argument('--mincpus', type=int, help='minimum number of logical processors per node')
+    parser.add_argument('--reservation', help='allocate resources from named reservation')
+    parser.add_argument('--tmp', help='minimum amount of temporary disk')
+    parser.add_argument('-w', '--nodelist', help='request a specific list of hosts')
+    parser.add_argument('-x', '--exclude', help='exclude a specific list of hosts')
+
+    # GPU scheduling options
+    parser.add_argument('--cpus-per-gpu', type=int, help='number of CPUs required per allocated GPU')
+    parser.add_argument('-G', '--gpus', help='count of GPUs required for the job')
+    parser.add_argument('--gpu-bind', help='task to gpu binding options')
+    parser.add_argument('--gpu-freq', help='frequency and voltage of GPUs')
+    parser.add_argument('--gpus-per-node', help='number of GPUs required per allocated node')
+    parser.add_argument('--gpus-per-socket', help='number of GPUs required per allocated socket')
+    parser.add_argument('--gpus-per-task', help='number of GPUs required per spawned task')
+    parser.add_argument('--mem-per-gpu', help='real memory required per allocated GPU')
+    
+    args = parser.parse_args()
+    
+    # Handle any provided options
+    for arg in vars(args):
+        value = getattr(args, arg)
+        if value is not None and arg != 'script':
+            if isinstance(value, bool):
+                if value:
+                    not_avail(f"--{arg.replace('_', '-')}")
+            elif isinstance(value, int):
+                not_avail(f"--{arg.replace('_', '-')}={value}")
+            elif isinstance(value, str):
+                not_avail(f"--{arg.replace('_', '-')}={value}")
+    
+    return args
+
 class EnvConfig:
     def __init__(self, filepath):
         """
@@ -100,6 +232,13 @@ def test_vars():
     #    print(f"{key}: {value}")
 
 
-# Example usage:
+# Main execution
 if __name__ == "__main__":
-    test_vars()
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Parse SBATCH directives from the script
+    directives = parse_sbatch_directives(args.script)
+    
+    # Load environment configuration
+    env_config = EnvConfig('default.env')
