@@ -1,0 +1,9 @@
+#! /bin/bash
+#SBATCH --cpus-per-task 1
+#SBATCH --mem=4G
+#SBATCH --time=1:00:00
+#SBATCH -p batch
+#SBATCH --job-name "Moin"
+
+echo "Hello from Moin test job"
+sleep 60

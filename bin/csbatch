@@ -5,28 +5,176 @@
 """
 
 import sys
+import os
 import argparse
 import re
+import json
+import subprocess
+import warnings
+import pwd
+import grp
+import getpass
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 
 def not_avail(option):
     """Inform user that an option is not yet implemented"""
     print(f"Warning: Option '{option}' is not yet implemented")
 
-def parse_sbatch_directives(filename):
-    """Parse #SBATCH directives from a submission script"""
-    directives = []
+def parse_sbatch_directives(filename: str) -> Dict[str, Any]:
+    """
+    Parse #SBATCH directives from a submission script and return resource requirements
+    
+    Returns:
+        Dict with keys:
+        - cpus: Number of CPUs required
+        - memory_mb: Memory in MB
+        - gpus: Number of GPUs required
+        - time_minutes: Time limit in minutes
+        - local_disk_gb: Local disk space in GB
+    """
+    resources = {
+        'cpus': 1,
+        'memory_mb': 1024,  # 1GB default
+        'gpus': 0,
+        'time_minutes': 60,
+        'local_disk_gb': 0
+    }
+    
     try:
         with open(filename, 'r') as f:
-            for line in f:
-                if line.startswith('#SBATCH'):
-                    # Extract the directive without #SBATCH
-                    directive = line.replace('#SBATCH', '').strip()
-                    directives.append(directive)
-                    not_avail(directive)
+            content = f.read()
+            
+        # Parse CPU requirements
+        if cpu_match := re.search(r'#SBATCH\s+--cpus-per-task=(\d+)', content):
+            resources['cpus'] = int(cpu_match.group(1))
+            
+        # Parse memory requirements
+        if mem_match := re.search(r'#SBATCH\s+--mem=(\d+)(M|G)?', content):
+            amount = int(mem_match.group(1))
+            unit = mem_match.group(2) or 'M'
+            resources['memory_mb'] = amount * 1024 if unit == 'G' else amount
+            
+        # Parse GPU requirements
+        if gpu_match := re.search(r'#SBATCH\s+--gpus=(\d+)', content):
+            resources['gpus'] = int(gpu_match.group(1))
+            
+        # Parse time limit
+        if time_match := re.search(r'#SBATCH\s+--time=(?:(\d+)-)?(\d+):(\d+):(\d+)', content):
+            days = int(time_match.group(1) or 0)
+            hours = int(time_match.group(2))
+            minutes = int(time_match.group(3))
+            resources['time_minutes'] = days * 1440 + hours * 60 + minutes
+            
+        # Parse local disk requirements
+        if disk_match := re.search(r'#SBATCH\s+--tmp=(\d+)(M|G)?', content):
+            amount = int(disk_match.group(1))
+            unit = disk_match.group(2) or 'M'
+            resources['local_disk_gb'] = amount // 1024 if unit == 'M' else amount
+            
     except FileNotFoundError:
         print(f"Error: Script file '{filename}' not found")
         sys.exit(1)
-    return directives
+        
+    return resources
+
+def check_filesystem_references(text: str) -> List[Tuple[str, bool]]:
+    """
+    Search for words starting with '/' and check if they are filesystem folders.
+    
+    Args:
+        text (str): The input text to search for potential filesystem references
+        
+    Returns:
+        List[Tuple[str, bool]]: List of tuples containing (path, exists_flag)
+    """
+    pattern = r'\b/\w+(?:/\w+)*\b'
+    potential_paths = re.findall(pattern, text)
+    results = []
+    
+    for path in potential_paths:
+        path_obj = Path(path)
+        exists = path_obj.exists() and path_obj.is_dir()
+        results.append((path, exists))
+        
+        if exists:
+            warnings.warn(
+                f"Found reference to existing filesystem path: {path}",
+                category=UserWarning
+            )
+            
+    return results
+
+def analyze_text(text: str, ignore_paths: List[str] = None) -> dict:
+    """
+    Analyze text for filesystem references with additional options and detailed reporting.
+    
+    Args:
+        text (str): The input text to analyze
+        ignore_paths (List[str], optional): List of paths to ignore
+        
+    Returns:
+        dict: Analysis results including found paths and statistics
+    """
+    ignore_paths = set(ignore_paths or [])
+    results = check_filesystem_references(text)
+    
+    report = {
+        "total_references": len(results),
+        "existing_paths": [],
+        "nonexistent_paths": [],
+        "ignored_paths": [],
+        "statistics": {
+            "total": len(results),
+            "existing": 0,
+            "nonexistent": 0,
+            "ignored": 0
+        }
+    }
+    
+    for path, exists in results:
+        if path in ignore_paths:
+            report["ignored_paths"].append(path)
+            report["statistics"]["ignored"] += 1
+        elif exists:
+            report["existing_paths"].append(path)
+            report["statistics"]["existing"] += 1
+        else:
+            report["nonexistent_paths"].append(path)
+            report["statistics"]["nonexistent"] += 1
+    
+    return report
+
+def validate_paths(script_path: str, shared_mount: str) -> bool:
+    """
+    Validate that all file system references in the script are within FOMO_MOUNT_SHARED
+    
+    Returns:
+        bool: True if all paths are valid, False otherwise
+    """
+    try:
+        with open(script_path, 'r') as f:
+            script_content = f.read()
+            
+        # Get the real path of the shared mount
+        shared_mount_path = os.path.realpath(shared_mount)
+        
+        # Analyze the script
+        analysis = analyze_text(script_content)
+        
+        # Check each existing path
+        for path in analysis['existing_paths']:
+            real_path = os.path.realpath(path)
+            if not real_path.startswith(shared_mount_path):
+                print(f"Error: Path '{path}' is outside of shared mount {shared_mount}")
+                return False
+                
+        return True
+        
+    except Exception as e:
+        print(f"Error validating paths: {e}")
+        return False
 
 def parse_arguments():
     """Parse command line arguments similar to sbatch"""
@@ -125,7 +273,7 @@ def parse_arguments():
     # Handle any provided options
     for arg in vars(args):
         value = getattr(args, arg)
-        if value is not None and arg != 'script':
+        if value is not None and arg != 'script' and arg != 'verbose':  # Skip verbose option
             if isinstance(value, bool):
                 if value:
                     not_avail(f"--{arg.replace('_', '-')}")
@@ -233,12 +381,569 @@ def test_vars():
 
 
 # Main execution
+def generate_cloud_init(script_path: str, username: str, env_config: EnvConfig) -> str:
+    """Generate cloud-init script for the EC2 instance"""
+    work_dir = os.path.join(os.path.dirname(__file__), '..', '.work')
+    os.makedirs(work_dir, exist_ok=True)
+    
+    # Base cloud-init template
+    with open(os.path.join(work_dir, 'ec2-cloud-init-node.txt'), 'r') as f:
+        cloud_init = f.read()
+        
+    # Generate user/group setup
+    def get_user_groups(username):
+        """Get all groups for a user using only Python standard library"""
+        try:
+            # Get user's password database entry for primary group
+            pw_entry = pwd.getpwnam(username)
+            primary_gid = pw_entry.pw_gid
+            primary_group = grp.getgrgid(primary_gid).gr_name
+
+            # Get all groups the user is in using os.getgrouplist
+            gids = os.getgrouplist(username, primary_gid)
+            
+            # Convert GIDs to group names, excluding primary group
+            secondary_groups = []
+            for gid in gids:
+                try:
+                    group_name = grp.getgrgid(gid).gr_name
+                    if group_name != primary_group:
+                        secondary_groups.append(group_name)
+                except KeyError:
+                    continue
+            
+            return primary_group, sorted(secondary_groups)
+        except (KeyError, AttributeError):
+            return None, []
+
+    def analyze_ownership(directory):
+        current_user = getpass.getuser()
+        users = defaultdict(set)    # {username: {uid}}
+        groups = defaultdict(set)   # {groupname: {gid}}
+        user_groups = {}           # {username: (primary_group, [secondary_groups])}
+        
+        # Get entries in directory (excluding hidden files)
+        dir_path = Path(directory)
+        try:
+            entries = [e for e in dir_path.iterdir() if not e.name.startswith('.')]
+        except FileNotFoundError:
+            print(f"Error: Shared mount directory '{directory}' does not exist.")
+            print("Please ensure the directory exists and is accessible.")
+            print("You may need to:")
+            print("1. Check if the shared filesystem is mounted")
+            print("2. Verify the FOMO_MOUNT_SHARED path in your .env file")
+            print("3. Ensure you have proper permissions to access the directory")
+            sys.exit(1)
+        
+        for entry in entries:
+            stat = entry.stat()
+            uid, gid = stat.st_uid, stat.st_gid
+            
+            try:
+                username = pwd.getpwuid(uid).pw_name
+                if username == current_user:  # Only process current user
+                    users[username].add(uid)
+                    
+                    # Get all groups for this user
+                    primary_group, secondary_groups = get_user_groups(username)
+                    if primary_group:
+                        user_groups[username] = (primary_group, secondary_groups)
+                        
+                        # Add primary group to groups dict
+                        try:
+                            groups[primary_group].add(grp.getgrnam(primary_group).gr_gid)
+                        except KeyError:
+                            pass
+                        
+                        # Add secondary groups to groups dict
+                        for group in secondary_groups:
+                            try:
+                                groups[group].add(grp.getgrnam(group).gr_gid)
+                            except KeyError:
+                                pass
+            except KeyError:
+                pass
+        
+        return users, groups, user_groups
+
+    def generate_script(users, groups, user_groups):
+        """Generate user and group setup commands to be added to cloud-init"""
+        script_content = []
+        
+        # Write group creation commands
+        script_content.append('\n# Create groups')
+        for groupname, gids in sorted(groups.items()):
+            for gid in sorted(gids):
+                # Error if GID 1000 is encountered as it's reserved for cloud instance default users
+                if gid == 1000:
+                    print(f"Error: GID 1000 is reserved for cloud instance users.")
+                    print("Please use a group that has a different GID.")
+                    print("You can check your group GIDs with the command: id -G")
+                    sys.exit(1)
+                script_content.append(f'groupadd -g {gid} {groupname} 2>/dev/null || handle_error "Group {groupname} already exists"')
+        
+        script_content.append('\n# Create user with their groups')
+        # Write user creation commands with all their groups
+        for username, uids in sorted(users.items()):
+            for uid in sorted(uids):
+                try:
+                    # Error if UID 1000 is encountered as it's reserved for cloud instance default users
+                    if uid == 1000:
+                        print(f"Error: UID 1000 is reserved for cloud instance users.")
+                        print("Please login with a different user account that has a different UID.")
+                        print("You can check your UID with the command: id -u")
+                        sys.exit(1)
+                        
+                    primary_group, secondary_groups = user_groups.get(username, (None, []))
+                    if primary_group:
+                        cmd = f'useradd -u {uid} -g {primary_group}'
+                        
+                        # Add secondary groups if they exist
+                        if secondary_groups:
+                            cmd += f' -G {",".join(secondary_groups)}'
+                        
+                        cmd += f' -m {username} 2>/dev/null || handle_error "User {username} already exists"'
+                        script_content.append(cmd)
+                        
+                        # Add SSH key setup
+                        script_content.append(f'\n# Setup SSH keys for {username}')
+                        script_content.append(f'find_and_copy_ssh_keys {username}')
+                except KeyError:
+                    pass
+
+        return '\n'.join(script_content)
+    
+    shared_mount = env_config.get('FOMO_MOUNT_SHARED')
+    users, groups, user_groups = analyze_ownership(shared_mount)
+    
+    # Add helper functions at the start
+    cloud_init += '''
+# Helper functions
+handle_error() {
+  local exit_code=$?
+  echo "Warning: $1 (exit code: $exit_code)"
+  return 0  # Continue script execution
+}
+
+find_and_copy_ssh_keys() {
+  local target_user=$1
+  local found_keys=false
+  
+  # List of users to check for SSH keys
+  local users_to_check=("ec2-user" "rocky" "ubuntu")
+  
+  for source_user in "${users_to_check[@]}"; do
+    if [[ -f "/home/$source_user/.ssh/authorized_keys" ]]; then
+      echo "Found SSH keys from $source_user"
+      
+      # Create .ssh directory with proper permissions
+      mkdir -p "/home/$target_user/.ssh"
+      chmod 700 "/home/$target_user/.ssh"
+      
+      # Copy and set proper permissions on authorized_keys
+      cp "/home/$source_user/.ssh/authorized_keys" "/home/$target_user/.ssh/"
+      chmod 600 "/home/$target_user/.ssh/authorized_keys"
+      chown -R "$target_user:$(id -gn $target_user)" "/home/$target_user/.ssh"
+      
+      found_keys=true
+      break
+    fi
+  done
+  
+  if [[ "$found_keys" = false ]]; then
+    echo "No SSH keys found from any of the standard users"
+  fi
+}
+'''
+
+    # Generate user setup script content
+    setup_script = generate_script(users, groups, user_groups)
+    
+    # Add submission script
+    with open(script_path, 'r') as f:
+        submission_script = f.read()
+        
+    # Combine all parts
+    cloud_init += "\n# User and group setup\n"
+    cloud_init += setup_script
+    cloud_init += "\n# Submission script\n"
+    cloud_init += f"cat > /tmp/job.sh << 'EOL'\n{submission_script}\nEOL\n"
+    cloud_init += f"\nchmod +x /tmp/job.sh\n"
+    cloud_init += f"sudo -u {username} /tmp/job.sh\n"
+    
+    # Add cleanup logic
+    cloud_init += """
+# Calculate minutes until next hour boundary based on start time
+CURRENT_TIME=$(date +%s)
+ELAPSED_SECONDS=$((CURRENT_TIME - START_TIME))
+ELAPSED_MINUTES=$((ELAPSED_SECONDS / 60))
+MINUTES_IN_HOUR=60
+MINUTES_LEFT=$((MINUTES_IN_HOUR - (ELAPSED_MINUTES % MINUTES_IN_HOUR)))
+
+if [ $MINUTES_LEFT -gt 5 ]; then
+    sleep $(($MINUTES_LEFT - 5))m
+fi
+
+# Cleanup and shutdown
+fusermount3 -u ${FOMO_MOUNT_SHARED}
+shutdown -h now
+"""
+    
+    # Write to file
+    output_path = os.path.join(work_dir, f'ec2-cloud-init-node-{username}.txt')
+    with open(output_path, 'w') as f:
+        f.write(cloud_init)
+        
+    return output_path
+
+import boto3
+import botocore.exceptions
+from botocore.exceptions import ClientError
+
+def find_instance_type(resources: Dict[str, Any]) -> str:
+    """Find the smallest suitable EC2 instance type based on resource requirements"""
+    try:
+        ec2_client = boto3.client('ec2')
+        
+        # Get allowed instance families from config
+        allowed_families = env_config.get('FOMO_EC2_FAMILIES_NODE', '').split(',')
+        if not allowed_families or not allowed_families[0]:
+            print("Warning: FOMO_EC2_FAMILIES_NODE not set, using all instance families")
+            allowed_families = ['*']
+
+        suitable_types = []
+        paginator = ec2_client.get_paginator('describe_instance_types')
+        
+        # Build instance family patterns
+        filters = []
+        if '*' not in allowed_families:
+            instance_patterns = [f"{family}.*" for family in allowed_families]
+            filters.append({
+                'Name': 'instance-type',
+                'Values': instance_patterns
+            })
+
+        for page in paginator.paginate(Filters=filters):
+            for itype in page['InstanceTypes']:
+                # Basic requirements check
+                vcpus = itype['VCpuInfo']['DefaultVCpus']
+                memory = itype['MemoryInfo']['SizeInMiB']
+                
+                if vcpus >= resources['cpus'] and memory >= resources['memory_mb']:
+                    # GPU requirements check if needed
+                    if resources['gpus'] > 0:
+                        gpu_info = itype.get('GpuInfo', {}).get('Gpus', [])
+                        if not gpu_info:
+                            continue
+                        gpu_count = sum(gpu.get('Count', 0) for gpu in gpu_info)
+                        if gpu_count < resources['gpus']:
+                            continue
+                        if resources.get('gpu_vram'):
+                            gpu_memory = gpu_info[0].get('MemoryInfo', {}).get('SizeInMiB', 0)
+                            if gpu_memory < resources['gpu_vram'] * 1024:
+                                continue
+                    
+                    # Local disk check if needed
+                    if resources.get('local_disk_gb', 0) > 0:
+                        storage_info = itype.get('InstanceStorageInfo', {})
+                        if not storage_info or storage_info.get('TotalSizeInGB', 0) < resources['local_disk_gb']:
+                            continue
+                    
+                    suitable_types.append(itype)
+
+        if not suitable_types:
+            print("No instance types found matching requirements. Using c7i.large")
+            return "c7i.large"
+
+        # Sort by vCPUs, memory, and GPU memory (if applicable) to get smallest viable instance
+        if resources['gpus'] > 0:
+            suitable_types.sort(
+                key=lambda x: (
+                    x['VCpuInfo']['DefaultVCpus'],
+                    x['MemoryInfo']['SizeInMiB'],
+                    x.get('GpuInfo', {}).get('Gpus', [{}])[0].get('MemoryInfo', {}).get('SizeInMiB', 0)
+                )
+            )
+        else:
+            suitable_types.sort(
+                key=lambda x: (
+                    x['VCpuInfo']['DefaultVCpus'],
+                    x['MemoryInfo']['SizeInMiB']
+                )
+            )
+
+        return suitable_types[0]['InstanceType']
+
+    except (ClientError, botocore.exceptions.TokenRetrievalError) as e:
+        if "Token has expired" in str(e):
+            print("Error: AWS CLI is not authenticated. Executing 'aws sso login --no-browser'")
+            try:
+                subprocess.run(["aws", "sso", "login", "--no-browser"], check=True)
+                # Retry the operation after login
+                return find_instance_type(resources)
+            except subprocess.CalledProcessError as sso_error:
+                print(f"Error during SSO login: {sso_error}")
+                sys.exit(1)
+        else:
+            print(f"Error finding instance type: {e}")
+            return "t3.small"
+
+def find_ami_image(env_config: EnvConfig, arch: str = 'x86_64') -> str:
+    """Find latest AMI ID matching FOMO_AMINAME_NODE"""
+    try:
+        ec2_client = boto3.client('ec2')
+        filters = [
+            {'Name': 'name', 'Values': ['Rocky-9-EC2-Base*', 'Rocky-10-EC2-Base*']},
+            {'Name': 'architecture', 'Values': [arch]},
+            {'Name': 'virtualization-type', 'Values': ['hvm']},
+            {'Name': 'state', 'Values': ['available']}
+        ]
+        
+        response = ec2_client.describe_images(
+            Owners=['792107900819'],  # Rocky Linux owner ID
+            Filters=filters
+        )
+        
+        if not response['Images']:
+            print(f"Error: No matching AMI found for architecture {arch}")
+            sys.exit(1)
+            
+        # Sort by deprecation time to get the latest
+        images = sorted(response['Images'], 
+                      key=lambda x: x.get('DeprecationTime', '9999-12-31'),  # Default to far future if no deprecation
+                      reverse=True)
+        
+        ami_id = images[0]['ImageId']
+        ami_name = images[0]['Name'].split('/')[-1]
+        print(f'Using AMI image {ami_name}')
+        return ami_id
+        
+    except ClientError as e:
+        print(f"Error finding AMI: {e}")
+        sys.exit(1)
+
+def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_config: EnvConfig) -> str:
+    """Launch EC2 instance with the specified resources"""
+    try:
+        # Find appropriate instance type
+        instance_type = find_instance_type(resources)
+        print(f"Selected instance type: {instance_type}")
+        
+        # Get instance type architecture first
+        ec2_client = boto3.client('ec2')
+        instance_response = ec2_client.describe_instance_types(
+            InstanceTypes=[instance_type]
+        )
+        if not instance_response['InstanceTypes']:
+            print("Error: Could not get instance type details")
+            sys.exit(1)
+            
+        instance_arch = instance_response['InstanceTypes'][0]['ProcessorInfo']['SupportedArchitectures'][0]
+        
+        # Find matching AMI for the instance architecture
+        ami_id = find_ami_image(env_config, instance_arch)
+        
+        # Get AMI details for output
+        ami_response = ec2_client.describe_images(ImageIds=[ami_id])
+        ami_arch = instance_arch
+        print(f"Selected AMI: {ami_id} ({ami_arch})")
+        
+        # Get instance type architecture
+        instance_response = ec2_client.describe_instance_types(
+            InstanceTypes=[instance_type]
+        )
+        if not instance_response['InstanceTypes']:
+            print("Error: Could not get instance type details")
+            sys.exit(1)
+            
+        instance_arch = instance_response['InstanceTypes'][0]['ProcessorInfo']['SupportedArchitectures'][0]
+        
+        # If architectures don't match, we need to find a new AMI with matching architecture
+        if instance_arch != ami_arch:
+            print(f"Architecture mismatch: Instance type {instance_type} is {instance_arch} but AMI is {ami_arch}")
+            print(f"Finding new AMI with {instance_arch} architecture...")
+            
+            # Find new AMI with matching architecture
+            filters = [{
+                'Name': 'name',
+                'Values': [env_config.get('FOMO_AMINAME_NODE')]
+            }, {
+                'Name': 'architecture',
+                'Values': [instance_arch]
+            }]
+            
+            ami_response = ec2_client.describe_images(
+                Owners=['792107900819'],  # Rocky Linux owner ID
+                Filters=filters
+            )
+            
+            if not ami_response['Images']:
+                print(f"Error: No AMI found matching {instance_arch} architecture")
+                sys.exit(1)
+                
+            # Sort by creation date to get the latest
+            images = sorted(ami_response['Images'], 
+                          key=lambda x: x['CreationDate'],
+                          reverse=True)
+            
+            ami_id = images[0]['ImageId']
+            ami_arch = instance_arch
+            print(f"Selected new AMI: {ami_id} ({ami_arch})")
+        
+        # Read user data from file
+        with open(cloud_init_path, 'r') as f:
+            user_data = f.read()
+        
+        # Create EC2 client
+        region = env_config.get('FOMO_AWS_REGION')
+        if not region or '${' in region:
+            region = 'us-west-2'  # Default to us-west-2 if not set
+        ec2_client = boto3.client('ec2', region_name=region)
+        
+        # Get security group ID
+        security_group = env_config.get('FOMO_EC2_SEC_GR')
+        if not security_group:
+            print("Error: FOMO_EC2_SEC_GR not set in environment config")
+            sys.exit(1)
+            
+        # Verify security group exists
+        try:
+            sg_response = ec2_client.describe_security_groups(GroupNames=[security_group])
+            security_group_id = sg_response['SecurityGroups'][0]['GroupId']
+        except ClientError as e:
+            print(f"Error: Security group '{security_group}' not found: {e}")
+            sys.exit(1)
+
+        # Get key name from config
+        key_name = env_config.get('FOMO_EC2_KEY_NAME')
+        if not key_name:
+            print("Error: FOMO_EC2_KEY_NAME not set in environment config")
+            sys.exit(1)
+
+        # Launch instance
+        response = ec2_client.run_instances(
+            ImageId=ami_id,
+            InstanceType=instance_type,
+            MinCount=1,
+            MaxCount=1,
+            KeyName=key_name,
+            SecurityGroupIds=[security_group_id],
+            UserData=user_data
+        )
+        
+        instance = response['Instances'][0]
+        instance_id = instance['InstanceId']
+        az = instance['Placement']['AvailabilityZone']
+        print(f"Instance launched in availability zone: {az}")
+        
+        # Get detailed instance info for output
+        instance_info = ec2_client.describe_instance_types(
+            InstanceTypes=[instance_type]
+        )['InstanceTypes'][0]
+        
+        vcpus = instance_info['VCpuInfo']['DefaultVCpus']
+        memory = instance_info['MemoryInfo']['SizeInMiB'] / 1024  # Convert to GB
+        ephemeral = instance_info.get('InstanceStorageInfo', {}).get('TotalSizeInGB', 0)
+        gpu_info = instance_info.get('GpuInfo', {}).get('Gpus', [{}])[0]
+        gpu_name = gpu_info.get('Name', 'N/A')
+        gpu_memory = gpu_info.get('MemoryInfo', {}).get('SizeInMiB', 0) / 1024  # Convert to GB
+        
+        print(f"Selected instance type: {instance_type} (Architecture: {instance_arch}, vCPUs: {vcpus}, "
+              f"Mem: {memory:.1f} GB, Ephemeral: {ephemeral} GB, GPU: {gpu_name} ({gpu_memory:.1f} GB))")
+        
+        print(f"Searching for AMI with OS: {env_config.get('FOMO_AMINAME_NODE')}, Architecture: {instance_arch}")
+        print(f"AMI Image found: {ami_id} ({ami_response['Images'][0]['Name']})")
+        
+        return instance_id, instance_type, ami_id, ami_response['Images'][0]['Name']
+        
+    except ClientError as e:
+        print(f"Error launching EC2 instance: {e}")
+        sys.exit(1)
+
 if __name__ == "__main__":
-    # Parse command line arguments
-    args = parse_arguments()
+    instance_id = None
+    try:
+        # Parse command line arguments
+        args = parse_arguments()
+        
+        # Load environment configuration
+        env_file = '.env' if os.path.exists('.env') else 'default.env'
+        env_config = EnvConfig(env_file)
+        
+        # Validate paths
+        if not validate_paths(args.script, env_config.get('FOMO_MOUNT_SHARED')):
+            sys.exit(1)
+        
+        # Parse SBATCH directives from the script
+        resources = parse_sbatch_directives(args.script)
+        
+        # Generate cloud-init script
+        username = os.getenv('USER')
+        cloud_init_path = generate_cloud_init(args.script, username, env_config)
+        
+        # Launch EC2 instance
+        instance_id, instance_type, ami_id, ami_name = launch_ec2_instance(cloud_init_path, resources, env_config)
+        
+        print(f"EC2_TYPE: {instance_type}")
+        print(f"AMI_IMAGE: {ami_id}")
+        print(f"AMI_NAME: {ami_name}")
+        print(f"EC2_USER: rocky")  # Rocky Linux uses 'rocky' user
+        
+        print(f"Instance {instance_id} is starting. Waiting for public IP...")
+        
+        # Wait for instance to be ready and get its public IP
+        ec2_client = boto3.client('ec2')
+        waiter = ec2_client.get_waiter('instance_running')
+        try:
+            waiter.wait(InstanceIds=[instance_id])
+        except KeyboardInterrupt:
+            print("\nOperation interrupted by user. Cleaning up...")
+            if instance_id:
+                try:
+                    ec2_client.terminate_instances(InstanceIds=[instance_id])
+                    print(f"Terminated instance {instance_id}")
+                except Exception as e:
+                    print(f"Error terminating instance: {e}")
+            sys.exit(1)
+        
+        instance = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
+        public_ip = instance.get('PublicIpAddress')
+        public_dns = instance.get('PublicDnsName')
+        
+        if not public_ip:
+            print("Error: Instance did not receive a public IP address")
+            sys.exit(1)
+            
+        # Print SSH connection commands
+        print("\nRun one of these SSH commands to connect:")
+        # Get AWS account and user info
+        sts_client = boto3.client('sts')
+        caller_identity = sts_client.get_caller_identity()
+        aws_account = caller_identity['Account']
+        aws_user = caller_identity['Arn'].split('/')[-1].split('@')[0]
+        
+        key_file = f"~/.ssh/auto-ec2-{aws_account}-{aws_user}.pem"
+        key_file = os.path.expanduser(key_file)
+        print(f"ssh -i {key_file} rocky@{public_dns}")
+        print(f"ssh -i {key_file} rocky@{public_ip}")
     
-    # Parse SBATCH directives from the script
-    directives = parse_sbatch_directives(args.script)
-    
-    # Load environment configuration
-    env_config = EnvConfig('default.env')
+    except KeyboardInterrupt:
+        print("\nOperation interrupted by user. Cleaning up...")
+        if instance_id:
+            try:
+                ec2_client = boto3.client('ec2')
+                ec2_client.terminate_instances(InstanceIds=[instance_id])
+                print(f"Terminated instance {instance_id}")
+            except Exception as e:
+                print(f"Error terminating instance: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nError: {e}")
+        if instance_id:
+            try:
+                ec2_client = boto3.client('ec2')
+                ec2_client.terminate_instances(InstanceIds=[instance_id])
+                print(f"Terminated instance {instance_id}")
+            except Exception as term_error:
+                print(f"Error terminating instance: {term_error}")
+        sys.exit(1)

@@ -78,7 +78,8 @@ class EnvConfig:
 def test_vars():
     """Test the EnvConfig class with some variables."""
     # Create a config object
-    env_config = EnvConfig('default.env')  # or '.env' if renamed
+    env_file = '.env' if os.path.exists('.env') else 'default.env'
+    env_config = EnvConfig(env_file)
     
     # Print all variables
     print("Current variables:")

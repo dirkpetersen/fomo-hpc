@@ -111,11 +111,15 @@ config_env() {
 create_folders_files
 config_env
 
-envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init.sh  > "${FOMO_ROOT}/.work/ec2-cloud-init-headnode.txt"
-envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-headnode.sh  >> "${FOMO_ROOT}/.work/ec2-cloud-init-headnode.txt"
+# Get local timezone
+LOCAL_TZ=$(timedatectl show --property=Timezone --value)
 
-envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init.sh  > "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt"
-envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-node.sh  >> "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt"
+# Process cloud-init scripts and add timezone
+for script in "headnode" "node"; do
+  envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init.sh > "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
+  echo "timedatectl set-timezone ${LOCAL_TZ}" >> "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
+  envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-${script}.sh >> "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
+done
 
 cp "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt" "${FOMO_ROOT}/.work/ec2-cloud-init-node-template.txt"
 

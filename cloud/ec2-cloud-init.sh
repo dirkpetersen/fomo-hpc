@@ -48,6 +48,7 @@ format_largest_unused_block_devices() {
   fi
 }
 ###################### 
+START_TIME=$(date +%s)
 PKGM=''
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
@@ -67,4 +68,5 @@ ${PKGM} install -y redis6 nfs-utils openldap-clients fuse3 iotop iftop mc
 # activating multi-user access for fuse
 sed -i 's/^# user_allow_other/user_allow_other/' /etc/fuse.conf
 curl -sSL https://d.juicefs.com/install | sh -
+
 ### end of ec2-cloud-init.txt
