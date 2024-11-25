@@ -13,8 +13,6 @@ fi
 if [[ -d "/opt" ]]; then
   echo "Configuring exports..."    
   echo "/opt *(rw,sync,no_root_squash,no_subtree_check)" | sudo tee -a /etc/exports
-  #mkdir -p /opt/temp
-  #chown 1000:1000 /opt/temp
   # Apply exports
   sudo exportfs -ra
 fi

@@ -6,9 +6,9 @@
 
 import sys
 import os
+import time
 import argparse
 import re
-import json
 import subprocess
 import warnings
 import pwd
@@ -171,11 +171,37 @@ def analyze_text(text: str, ignore_paths: List[str] = None) -> dict:
 def validate_paths(script_path: str, shared_mount: str) -> bool:
     """
     Validate that all file system references in the script are within FOMO_MOUNT_SHARED
+    and that FOMO_MOUNT_SHARED is mounted as a juicefs filesystem
     
     Returns:
         bool: True if all paths are valid, False otherwise
     """
     try:
+        # Check if shared_mount exists and is mounted
+        if not os.path.ismount(shared_mount):
+            print(f"Error: {shared_mount} is not mounted")
+            print("Please ensure the JuiceFS filesystem is properly mounted at this location")
+            return False
+
+        # Check if it's a JuiceFS mount
+        try:
+            with open('/proc/mounts', 'r') as f:
+                mounts = f.read()
+                mount_type = None
+                for line in mounts.splitlines():
+                    if shared_mount in line:
+                        mount_type = line.split()[2]
+                        break
+                
+                if mount_type != 'fuse.juicefs':
+                    print(f"Error: {shared_mount} is not mounted as a JuiceFS filesystem")
+                    print("The shared mount must be a JuiceFS filesystem")
+                    print("Current mount type:", mount_type)
+                    return False
+        except Exception as e:
+            print(f"Error checking mount type: {e}")
+            return False
+
         with open(script_path, 'r') as f:
             script_content = f.read()
             
@@ -426,6 +452,7 @@ def generate_cloud_init(script_path: str, username: str, env_config: EnvConfig) 
         
     # Generate user/group setup
     def get_user_groups(username):
+        #print ("...entering get_user_groups")
         """Get all groups for a user using only Python standard library"""
         try:
             # Get user's password database entry for primary group
@@ -451,15 +478,77 @@ def generate_cloud_init(script_path: str, username: str, env_config: EnvConfig) 
             return None, []
 
     def analyze_ownership(directory, username):
+        #print ("...entering analyze_ownership")
 
         users = defaultdict(set)    # {username: {uid}}
         groups = defaultdict(set)   # {groupname: {gid}}
         user_groups = {}           # {username: (primary_group, [secondary_groups])}
         
+        # Get current user's info first
+        try:
+            current_user_info = pwd.getpwnam(username)
+            current_uid = current_user_info.pw_uid
+            current_gid = current_user_info.pw_gid
+            
+            # Get user's groups
+            primary_group, secondary_groups = get_user_groups(username)
+            if not primary_group:
+                print(f"Error: Could not get group information for user {username}")
+                sys.exit(1)
+                
+            # Always add current user and their primary group
+            users[username].add(current_uid)
+            user_groups[username] = (primary_group, secondary_groups)
+            
+            # Add primary group
+            try:
+                primary_group_info = grp.getgrgid(current_gid)
+                groups[primary_group_info.gr_name].add(current_gid)
+            except KeyError:
+                print(f"Warning: Could not find group info for GID {current_gid}")
+
+            # Add any groups that own directories in the shared mount AND 
+            # that the current user is a member of
+            try:
+                # Get all groups the current user is a member of
+                user_group_names = set(secondary_groups)
+                user_group_names.add(primary_group)
+
+                shared_dirs = [d for d in Path(directory).iterdir() if d.is_dir()]
+                for dir_path in shared_dirs:
+                    dir_stat = dir_path.stat()
+                    dir_gid = dir_stat.st_gid
+                    try:
+                        group_info = grp.getgrgid(dir_gid)
+                        group_name = group_info.gr_name
+                        # Only add groups that:
+                        # 1. Have actual names (not just numeric)
+                        # 2. The current user is a member of
+                        # 3. Own at least one non-hidden directory
+                        if (not group_name.isdigit() and 
+                            group_name in user_group_names):
+                            groups[group_name].add(dir_gid)
+                    except KeyError:
+                        continue
+            except (OSError, PermissionError) as e:
+                print(f"Warning: Could not scan shared directory: {e}")
+                
+        except KeyError:
+            print(f"Error: Could not get user information for {username}")
+            sys.exit(1)
+            
         # Get entries in directory (excluding hidden files)
         dir_path = Path(directory)
         try:
             entries = [e for e in dir_path.iterdir() if not e.name.startswith('.')]
+            if not entries:
+                print(f"Error: No non-hidden files found in shared mount directory '{directory}'")
+                print("The shared mount directory appears to be empty.")
+                print("Please ensure:")
+                print("1. The JuiceFS filesystem is properly mounted")
+                print("2. Files have been copied to the shared directory")
+                print("3. You have proper permissions to access the files")
+                sys.exit(1)
         except FileNotFoundError:
             print(f"Error: Shared mount directory '{directory}' does not exist.")
             print("Please ensure the directory exists and is accessible.")
@@ -468,84 +557,113 @@ def generate_cloud_init(script_path: str, username: str, env_config: EnvConfig) 
             print("2. Verify the FOMO_MOUNT_SHARED path in your .env file")
             print("3. Ensure you have proper permissions to access the directory")
             sys.exit(1)
-        
+
         for entry in entries:
             stat = entry.stat()
             uid, gid = stat.st_uid, stat.st_gid
             
             try:
+                # Get user info
                 user = pwd.getpwuid(uid).pw_name
-                if user == username:  # Only process current user
-                    users[user].add(uid)
+                users[user].add(uid)
+                
+                # Get group info - only add if it has a name
+                try:
+                    group_info = grp.getgrgid(gid)
+                    group_name = group_info.gr_name
+                    # Only add groups with actual names (not just numeric)
+                    if not group_name.isdigit():
+                        groups[group_name].add(gid)
                     
-                    # Get all groups for this user
+                    # Store user's group info
                     primary_group, secondary_groups = get_user_groups(user)
                     if primary_group:
                         user_groups[user] = (primary_group, secondary_groups)
                         
-                        # Add primary group to groups dict
-                        try:
+                        # Add all named groups this user belongs to
+                        if not primary_group.isdigit():
                             groups[primary_group].add(grp.getgrnam(primary_group).gr_gid)
-                        except KeyError:
-                            pass
-                        
-                        # Add secondary groups to groups dict
                         for group in secondary_groups:
-                            try:
-                                groups[group].add(grp.getgrnam(group).gr_gid)
-                            except KeyError:
-                                pass
+                            if not group.isdigit():
+                                try:
+                                    groups[group].add(grp.getgrnam(group).gr_gid)
+                                except KeyError:
+                                    pass
+                except KeyError:
+                    # Skip groups that can't be looked up
+                    pass
             except KeyError:
+                # Skip users that can't be looked up
                 pass
         
         return users, groups, user_groups
 
     def generate_script(users, groups, user_groups, username):
+        #print ("...entering generate_script")
+        # print(users, groups, user_groups, username)
         """Generate user and group setup commands to be added to cloud-init"""
         script_content = []
         
         # Write group creation commands
         script_content.append('\n# Create groups')
-        for groupname, gids in sorted(groups.items()):
-            for gid in sorted(gids):
-                # Error if GID 1000 is encountered as it's reserved for cloud instance default users
-                if gid == 1000:
-                    print(f"Error: Your current user {username} has GID 1000.")
-                    print("This UID and GID are reserved for cloud instance default users.")
-                    print("Please run this command with a user account that has a different UID and GID.")
-                    print("You can check your UID/GIDs with the commands: id -u and id -g")
-                    sys.exit(1)
-                script_content.append(f'groupadd -g {gid} {groupname} 2>/dev/null || handle_error "Group {groupname} already exists"')
         
-        script_content.append('\n# Create user with their groups')
+        # Get all groups the user is a member of
+        primary_group, secondary_groups = user_groups.get(username, (None, []))
+        
+        all_user_groups = set(secondary_groups)
+        if primary_group is not None:
+            all_user_groups.add(primary_group)
+            
+        # Create all user's groups that have GID >= 200
+        for groupname in sorted(all_user_groups):
+            try:
+                group_info = grp.getgrnam(groupname)
+                gid = group_info.gr_gid
+                # Skip system groups
+                if gid < 200:
+                    continue
+                script_content.append(f'groupadd -g {gid} {groupname} 2>/dev/null || handle_error "Group {groupname} already exists"')
+            except KeyError:
+                continue
+        
+        script_content.append('\n# Create users with their groups')
         # Write user creation commands with all their groups
         for username, uids in sorted(users.items()):
             for uid in sorted(uids):
-                try:
-                    # Error if UID 1000 is encountered as it's reserved for cloud instance default users
-                    if uid == 1000:
-                        print(f"Error: Your current user {username} has UID 1000.")
-                        print("This UID is reserved for cloud instance default users.")
-                        print("Please run this command with a user account that has a different UID.")
-                        print("You can check your UID with the command: id -u")
-                        sys.exit(1)
-                        
-                    primary_group, secondary_groups = user_groups.get(username, (None, []))
-                    if primary_group:
-                        cmd = f'useradd -u {uid} -g {primary_group}'
-                        
-                        # Add secondary groups if they exist
-                        if secondary_groups:
-                            cmd += f' -G {",".join(secondary_groups)}'
-                        
-                        cmd += f' -m {username} 2>/dev/null || handle_error "User {username} already exists"'
-                        script_content.append(cmd)
-                        
-                        # Add SSH key setup
-                        script_content.append(f'\n# Setup SSH keys for {username}')
-                        script_content.append(f'find_and_copy_ssh_keys {username}')
-                except KeyError:
-                    pass
+                # Skip system UIDs
+                if uid < 1000:
+                    continue
+                    
+                primary_group, secondary_groups = user_groups.get(username, (None, []))
+                if primary_group:
+
+                    # Build useradd command
+                    cmd = f'useradd -u {uid} -g {primary_group}'
+                    
+                    # Filter out secondary groups with GID < 200
+                    valid_groups = set()
+                    for group in secondary_groups:
+                        try:
+                            group_info = grp.getgrnam(group)
+                            if group_info.gr_gid >= 200:
+                                valid_groups.add(group)
+                        except KeyError:
+                            continue
+                            
+                    # Add filtered secondary groups if they exist
+                    if valid_groups:
+                        cmd += f' -G {",".join(valid_groups)}'
+                    
+                    cmd += f' -d /home/{username} -m {username} 2>/dev/null || handle_error "User {username} already exists"'
+                    script_content.append(cmd)
+                    
+                    # Set permissions on home directory
+                    #script_content.append(f'chown {username}:{primary_group} /home/{username}')
+                    #script_content.append(f'chmod 750 /home/{username}')
+                    
+                    # Add SSH key setup
+                    script_content.append(f'\n# Setup SSH keys for {username}')
+                    script_content.append(f'find_and_copy_ssh_keys {username}')
 
         return '\n'.join(script_content)
     
@@ -601,18 +719,28 @@ find_and_copy_ssh_keys() {
         
     # Combine all parts
     cloud_init += "\n# User and group setup\n"
-    cloud_init += setup_script
+    cloud_init += setup_script + "\n"  # Add newline after setup script
+    
+    # Add directory creation for shared mount
+    cloud_init += f"\n# Create shared mount directory\n"
+    cloud_init += f"mkdir -p {env_config.get('FOMO_MOUNT_SHARED')}\n"
+    cloud_init += f"chown {username}:{username} {env_config.get('FOMO_MOUNT_SHARED')}\n"
+    
+    # Add submission script with proper ownership
+    now=int(time.time())
+    jobbase = os.path.join(env_config.get('FOMO_MOUNT_SHARED'), f'job-{username}-{now}')
     cloud_init += "\n# Submission script\n"
-    cloud_init += f"cat > /tmp/job.sh << 'EOL'\n{submission_script}\nEOL\n"
-    cloud_init += f"\nchmod +x /tmp/job.sh\n"
-    cloud_init += f"sudo -u {username} /tmp/job.sh\n"
+    cloud_init += f"cat > {jobbase}.sh << 'EOL'\n{submission_script}\nEOL\n"
+    cloud_init += f"chown {username}:{username} {jobbase}.sh\n"
+    cloud_init += f"\nchmod +x {jobbase}.sh\n"
+    cloud_init += f"sudo -u {username} {jobbase}.sh > {jobbase}.out 2>&1\n"
     
     # Add cleanup logic
     cloud_init += """
 # Install AWS CLI if not present
 if ! command -v aws >/dev/null 2>&1; then
   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  unzip awscliv2.zip
+  unzip -q awscliv2.zip
   ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
   rm -rf aws awscliv2.zip
 fi
@@ -636,6 +764,7 @@ fi
 # Cleanup and terminate instance
 fusermount3 -u ${FOMO_MOUNT_SHARED}
 aws ec2 terminate-instances --region ${REGION} --instance-ids ${INSTANCE_ID}
+shutdown -h now
 """
     
     # Write to file
@@ -973,13 +1102,8 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
         print(f"Selected instance type: {instance_type} (Architecture: {instance_arch}, vCPUs: {vcpus}, "
               f"Mem: {memory:.1f} GB, Ephemeral: {ephemeral} GB, GPU: {gpu_name} ({gpu_memory:.1f} GB))")
         
-        print(f"Searching for AMI with OS: {env_config.get('FOMO_AMINAME_NODE')}, Architecture: {instance_arch}")
-        print(f"AMI Image found: {ami_id} ({ami_response['Images'][0]['Name']})")
-        
-        print(f"EC2_TYPE: {instance_type}")
-        print(f"AMI_IMAGE: {ami_id}")
-        print(f"AMI_NAME: {ami_response['Images'][0]['Name']}")
-        print(f"EC2_USER: rocky")  # Rocky Linux uses 'rocky' user
+        #print(f"Searching for AMI with OS: {env_config.get('FOMO_AMINAME_NODE')}, Architecture: {instance_arch}")
+        #print(f"AMI Image found: {ami_id} ({ami_response['Images'][0]['Name']})")
         
         print(f"Instance {instance_id} is starting. Waiting for public IP...")
         
@@ -1014,9 +1138,9 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
         aws_user = caller_identity['Arn'].split('/')[-1].split('@')[0]
         
         key_file = f"~/.ssh/auto-ec2-{aws_account}-{aws_user}.pem"
-        key_file = os.path.expanduser(key_file)
-        print(f"ssh -i {key_file} rocky@{public_dns}")
-        print(f"ssh -i {key_file} rocky@{public_ip}")
+        #key_file = os.path.expanduser(key_file)
+        print(f"ssh -i {key_file} {username}@{public_dns}")
+        print(f"ssh -i {key_file} {username}@{public_ip}")
 
         return instance_id, instance_type, ami_id, ami_response['Images'][0]['Name'], public_ip, public_dns
         
@@ -1120,6 +1244,7 @@ if __name__ == "__main__":
         
         # Generate cloud-init script
         cloud_init_path = generate_cloud_init(args.script, username, env_config)
+        #sys.exit(1)
         
         # Launch EC2 instance
         instance_id, instance_type, ami_id, ami_name, public_ip, public_dns = launch_ec2_instance(cloud_init_path, resources, env_config, username)

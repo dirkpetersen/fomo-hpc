@@ -64,7 +64,8 @@ ${PKGM} install -y mdadm jq git
 # format EBS volume 
 format_largest_unused_block_devices /opt
 # install common packages 
-${PKGM} install -y redis6 nfs-utils openldap-clients fuse3 unzip iotop iftop mc
+${PKGM} install -y redis6 nfs-utils openldap-clients fuse3 unzip mc iotop iftop
+${PKGM} install -y --skip-broken redis redis6 nfs-utils openldap-clients fuse3 unzip mc iotop iftop
 # activating multi-user access for fuse
 sed -i 's/^# user_allow_other/user_allow_other/' /etc/fuse.conf
 curl -sSL https://d.juicefs.com/install | sh -
