@@ -116,11 +116,9 @@ LOCAL_TZ=$(timedatectl show --property=Timezone --value)
 
 # Process cloud-init scripts and add timezone
 for script in "headnode" "node"; do
-  envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init.sh > "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
+  cat ${FOMO_ROOT}/cloud/ec2-cloud-init.sh > "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
   echo "timedatectl set-timezone ${LOCAL_TZ}" >> "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
   envsubst < ${FOMO_ROOT}/cloud/ec2-cloud-init-${script}.sh >> "${FOMO_ROOT}/.work/ec2-cloud-init-${script}.txt"
 done
-
-cp "${FOMO_ROOT}/.work/ec2-cloud-init-node.txt" "${FOMO_ROOT}/.work/ec2-cloud-init-node-template.txt"
 
 echo -e "\n*** Configuration complete. ***\n"

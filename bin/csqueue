@@ -4,6 +4,12 @@
 # csqueue - shows list of jobs in slurm compatible format
 """
 
+import os
+import sys
+import boto3
+import json
+from datetime import datetime
+
 class EnvConfig:
     def __init__(self, filepath):
         """
@@ -101,6 +107,86 @@ def test_vars():
     #    print(f"{key}: {value}")
 
 
-# Example usage:
+def list_running_jobs():
+    """List all running EC2 instances as Slurm-style jobs"""
+    try:
+        ec2 = boto3.client('ec2')
+        response = ec2.describe_instances(
+            Filters=[
+                {'Name': 'instance-state-name', 'Values': ['pending', 'running', 'shutting-down', 'stopped']},
+                {'Name': 'tag:fomo-hpc', 'Values': ['true']}
+            ]
+        )
+
+        # Print header
+        print(f"{'JOBID':20} {'NAME':12} {'USER':12} {'STATE':5} {'TIME':10} {'CPUS':6} {'MEM (GB)':8} {'NODELIST'}")
+        print("-" * 85)
+
+        # Collect all instances first
+        all_instances = []
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                # Get instance details
+                instance_id = instance['InstanceId']
+                name = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), 'N/A')
+                launch_time = instance['LaunchTime']
+                
+                # Calculate runtime
+                runtime = datetime.now(launch_time.tzinfo) - launch_time
+                hours = int(runtime.total_seconds() // 3600)
+                minutes = int((runtime.total_seconds() % 3600) // 60)
+                runtime_str = f"{hours:02d}:{minutes:02d}:00"
+
+                # Get user from tags or default to current user
+                user = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'User'), 
+                          os.getenv('USER', 'unknown'))
+
+                # Get public IP if available
+                public_ip = instance.get('PublicIpAddress', 'N/A')
+
+                # Get instance type info for CPU and memory
+                instance_type_info = ec2.describe_instance_types(InstanceTypes=[instance['InstanceType']])['InstanceTypes'][0]
+                vcpus = instance_type_info['VCpuInfo']['DefaultVCpus']
+                memory_gib = instance_type_info['MemoryInfo']['SizeInMiB'] // 1024  # Convert MiB to GiB
+
+                # Print job info in Slurm-style format
+                # Get instance state
+                state = instance['State']['Name']
+                # Convert state to display format
+                if state in ['shutting-down', 'stopping']:
+                    display_state = 'CG'
+                elif state == 'stopped':
+                    display_state = 'ST'
+                elif state == 'running':
+                    display_state = 'R'
+                elif state == 'pending':
+                    display_state = 'PD'
+                else:
+                    continue  # Skip any other states (like terminated)
+                
+                # Store instance info in list
+                all_instances.append({
+                    'instance_id': instance_id,
+                    'name': name,
+                    'user': user,
+                    'state': display_state,
+                    'runtime_str': runtime_str,
+                    'runtime_seconds': runtime.total_seconds(),
+                    'vcpus': vcpus,
+                    'memory_gib': memory_gib,
+                    'public_ip': public_ip
+                })
+
+        # Sort instances by runtime (descending)
+        all_instances.sort(key=lambda x: x['runtime_seconds'], reverse=True)
+
+        # Print sorted instances
+        for inst in all_instances:
+            print(f"{inst['instance_id']:20} {inst['name']:12} {inst['user']:12} {inst['state']:5} {inst['runtime_str']:10} {inst['vcpus']:6} {inst['memory_gib']:8} {inst['public_ip']}")
+
+    except Exception as e:
+        print(f"Error listing jobs: {e}")
+        sys.exit(1)
+
 if __name__ == "__main__":
-    test_vars()
+    list_running_jobs()
