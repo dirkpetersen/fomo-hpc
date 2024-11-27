@@ -177,7 +177,6 @@ def validate_paths(script_path: str, shared_mount: str) -> bool:
     Returns:
         bool: True if all paths are valid, False otherwise
     """
-    return True
     try:
     # Check if shared_mount exists and is mounted
         if not os.path.ismount(shared_mount):
@@ -1203,9 +1202,16 @@ if __name__ == "__main__":
         # Load environment configuration
         env_file = '.env' if os.path.exists('.env') else 'default.env'
         env_config = EnvConfig(env_file)
-        
+
+        # Check for required config
+        shared_mount = env_config.get('FOMO_MOUNT_SHARED')
+        if not shared_mount:
+            print("Error: FOMO_MOUNT_SHARED not set in environment config")
+            print("Please set FOMO_MOUNT_SHARED in your .env file")
+            sys.exit(1)
+            
         # Validate paths
-        if not validate_paths(args.script, env_config.get('FOMO_MOUNT_SHARED')):
+        if not validate_paths(args.script, shared_mount):
             sys.exit(1)
             
         # Initialize resources with defaults
