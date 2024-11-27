@@ -1,0 +1,148 @@
+#! /usr/bin/python3
+
+"""
+# cscancel - cancels a job running on EC2
+"""
+
+import os
+import sys
+import boto3
+import json
+from datetime import datetime
+
+class EnvConfig:
+    def __init__(self, filepath):
+        """
+        Initialize the EnvConfig object with a filepath and load the variables.
+        
+        Args:
+            filepath (str): Path to the environment file
+        """
+        self.filepath = filepath
+        self._config = {}
+        self.load_config()
+
+    def load_config(self):
+        """Load or reload the configuration from the file."""
+        try:
+            with open(self.filepath, 'r') as file:
+                for line in file:
+                    # Skip empty lines and comments
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    # Split on first '=' to handle values that might contain '='
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        # Clean up the variables
+                        key = key.strip()
+                        value = value.strip()
+                        
+                        # Store in config dictionary
+                        self._config[key] = value
+                        
+                        # Dynamically set attribute
+                        setattr(self, key, value)
+                        
+        except FileNotFoundError:
+            print(f"Error: File {self.filepath} not found")
+        except Exception as e:
+            print(f"Error reading file: {e}")
+
+    def reload(self):
+        """Reload the configuration from the file."""
+        self._config.clear()
+        self.load_config()
+
+    def get(self, key, default=None):
+        """
+        Get a configuration value by key.
+        
+        Args:
+            key (str): The configuration key to look up
+            default: The value to return if key is not found
+        
+        Returns:
+            The value associated with the key, or default if not found
+        """
+        return self._config.get(key, default)
+
+    def all(self):
+        """
+        Get all configuration values as a dictionary.
+        
+        Returns:
+            dict: All configuration values
+        """
+        return self._config.copy()
+
+    def __str__(self):
+        """String representation of the configuration."""
+        return '\n'.join(f'{k}={v}' for k, v in self._config.items())
+
+def test_vars():
+    """Test the EnvConfig class with some variables."""
+    # Create a config object
+    env_file = '.env' if os.path.exists('.env') else 'default.env'
+    env_config = EnvConfig(env_file)
+    
+    # Print all variables
+    print("Current variables:")
+    print(env_config)
+    
+    # Access individual variables (multiple ways):
+    #print("\nAccessing individual variables:")
+    # Method 1: Direct attribute access
+    # if hasattr(env_config, 'FOMO_EC2TYPE'):
+    #    print(f"EC2 Type: {env_config.FOMO_EC2TYPE}")
+    
+    # Method 2: Dictionary-style access with get()
+    #print(f"Redis Password: {env_config.get('FOMO_REDIS_PW', 'Not set')}")
+            
+    # Get all variables as a dictionary
+    # all_vars = env_config.all()
+    #print("\nAll variables as dictionary:")
+    #for key, value in all_vars.items():
+    #    print(f"{key}: {value}")
+
+
+def terminate_instance(instance_id: str) -> None:
+    """Terminate an EC2 instance"""
+    try:
+        ec2_client = boto3.client('ec2')
+        
+        # Check if instance exists
+        response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        if not response['Reservations']:
+            print(f"Error: Instance {instance_id} not found")
+            sys.exit(1)
+            
+        # Terminate the instance
+        ec2_client.terminate_instances(InstanceIds=[instance_id])
+        print(f"Terminating instance {instance_id}")
+        
+        print("Instance termination initiated")
+        
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'InvalidInstanceID.NotFound':
+            print(f"Error: Instance {instance_id} not found")
+        else:
+            print(f"Error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: cscancel <instance-id> [instance-id ...]")
+        sys.exit(1)
+        
+    instance_ids = sys.argv[1:]
+    for instance_id in instance_ids:
+        if not instance_id.startswith('i-'):
+            print(f"Error: Invalid instance ID format for '{instance_id}'. Must start with 'i-'")
+            continue
+            
+        terminate_instance(instance_id)

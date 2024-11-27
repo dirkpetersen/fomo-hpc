@@ -734,6 +734,7 @@ find_and_copy_ssh_keys() {
     cloud_init += f"chown {username}:{username} {jobbase}.sh\n"
     cloud_init += f"\nchmod +x {jobbase}.sh\n"
     cloud_init += f"sudo -u {username} {jobbase}.sh > {jobbase}.out 2>&1\n"
+    cloud_init += f"chown {username}:{username} {jobbase}.out\n"
     
     # Add cleanup logic
     cloud_init += """
@@ -1130,7 +1131,7 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
             sys.exit(1)
             
         # Print SSH connection commands
-        print("\nRun one of these SSH commands to connect:")
+        print("\nWait a minute and run one of these SSH commands to connect:")
         # Get AWS account and user info
         sts_client = boto3.client('sts')
         caller_identity = sts_client.get_caller_identity()
