@@ -139,7 +139,7 @@ def get_instances_by_user(username: str) -> list:
         ec2_client = boto3.client('ec2')
         response = ec2_client.describe_instances(
             Filters=[
-                {'Name': 'instance-state-name', 'Values': ['pending', 'running']},
+                {'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopping', 'stopped']},
                 {'Name': 'tag:fomo-hpc', 'Values': ['true']}
             ]
         )
