@@ -19,7 +19,7 @@ import botocore.exceptions
 from botocore.exceptions import ClientError
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Tuple
 
 # List of implemented SBATCH options that can be set via CLI
 active_sbatch_options = [
@@ -720,6 +720,10 @@ find_and_copy_ssh_keys() {
     # Combine all parts
     cloud_init += "\n# User and group setup\n"
     cloud_init += setup_script + "\n"  # Add newline after setup script
+
+    # Add environment setup
+    module_path = env_config.get('FOMO_MODULE_PATH')
+    cloud_init += f'sudo -u {username} echo "export MODULEPATH={module_path}" > /home/{username}/.bashrc \n'
     
     # Add directory creation for shared mount
     cloud_init += f"\n# Create shared mount directory\n"
@@ -733,7 +737,7 @@ find_and_copy_ssh_keys() {
     cloud_init += f"cat > {jobbase}.sh << 'EOL'\n{submission_script}\nEOL\n"
     cloud_init += f"chown {username}:{username} {jobbase}.sh\n"
     cloud_init += f"\nchmod +x {jobbase}.sh\n"
-    cloud_init += f"sudo -u {username} {jobbase}.sh > {jobbase}.out 2>&1\n"
+    cloud_init += f'sudo -u {username} bash --login -c "{jobbase}.sh > {jobbase}.out 2>&1"\n'
     cloud_init += f"chown {username}:{username} {jobbase}.out\n"
     
     # Add cleanup logic
@@ -924,7 +928,7 @@ def find_ami_image(env_config: EnvConfig, arch: str = 'x86_64') -> str:
         
         ami_id = images[0]['ImageId']
         ami_name = images[0]['Name'].split('/')[-1]
-        print(f'Using AMI image {ami_name}')
+        print(f'Using AMI name {ami_name}')
         return ami_id
         
     except ClientError as e:
@@ -936,7 +940,7 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
     try:
         # Find appropriate instance type
         instance_type = find_instance_type(resources)
-        print(f"Selected instance type: {instance_type}")
+        #print(f"Selected instance type: {instance_type}")
         
         # Get instance type architecture first
         ec2_client = boto3.client('ec2')
@@ -1078,7 +1082,8 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
                 'ResourceType': 'instance',
                 'Tags': [
                     {'Key': 'Name', 'Value': job_name},
-                    {'Key': 'fomo-hpc', 'Value': 'true'}
+                    {'Key': 'fomo-hpc', 'Value': 'true'},
+                    {'Key': 'User', 'Value': username}
                 ]
             }]
         )

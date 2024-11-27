@@ -1,0 +1,12 @@
+#! /bin/bash
+#SBATCH --cpus-per-task 1
+#SBATCH --mem=4G
+#SBATCH --time=1:00:00
+#SBATCH -p batch
+#SBATCH --job-name "Airtravel"
+
+echo "Hello from Airtravel job"
+ml R
+cd /home/groups/dpcri/fomo-shared/airtravel-1011/
+Rscript airtravel.R
+sleep 60

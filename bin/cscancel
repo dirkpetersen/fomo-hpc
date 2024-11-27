@@ -7,7 +7,6 @@
 import os
 import sys
 import boto3
-import json
 from datetime import datetime
 
 class EnvConfig:
@@ -134,12 +133,67 @@ def terminate_instance(instance_id: str) -> None:
         print(f"Error: {e}")
         sys.exit(1)
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: cscancel <instance-id> [instance-id ...]")
-        sys.exit(1)
+def get_instances_by_user(username: str) -> list:
+    """Get all running instances for a specific user"""
+    try:
+        ec2_client = boto3.client('ec2')
+        response = ec2_client.describe_instances(
+            Filters=[
+                {'Name': 'instance-state-name', 'Values': ['pending', 'running']},
+                {'Name': 'tag:fomo-hpc', 'Values': ['true']}
+            ]
+        )
+
+        # Filter instances by username in the Name tag
+        instance_ids = []
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                # Get instance name from tags
+                name = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), '')
+                # Get instance user from tags
+                user = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'User'), '')
+                
+                # If no explicit user tag, try to get user from instance name
+                if not user and name:
+                    # Add instance if name matches username
+                    if name.startswith(username + '-') or name.endswith('-' + username):
+                        instance_ids.append(instance['InstanceId'])
+                        continue
+                
+                # Add instance if user tag matches
+                if user == username:
+                    instance_ids.append(instance['InstanceId'])
         
-    instance_ids = sys.argv[1:]
+        instance_ids = []
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instance_ids.append(instance['InstanceId'])
+                
+        return instance_ids
+    except Exception as e:
+        print(f"Error getting instances: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Cancel running jobs')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('instance_ids', nargs='*', help='Instance IDs to terminate', default=[])
+    group.add_argument('-u', '--user', help='Terminate all instances for specified user')
+    
+    args = parser.parse_args()
+    
+    if args.user:
+        instance_ids = get_instances_by_user(args.user)
+        if not instance_ids:
+            print(f"No running instances found for user {args.user}")
+            sys.exit(0)
+    else:
+        if not args.instance_ids:
+            parser.print_help()
+            sys.exit(1)
+        instance_ids = args.instance_ids
     for instance_id in instance_ids:
         if not instance_id.startswith('i-'):
             print(f"Error: Invalid instance ID format for '{instance_id}'. Must start with 'i-'")

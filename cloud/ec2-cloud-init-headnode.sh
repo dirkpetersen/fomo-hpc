@@ -28,12 +28,12 @@ fi
 juicefs format --storage s3 --bucket https://s3.${FOMO_AWS_REGION}.amazonaws.com/${FOMO_S3_BUCKET} \
     --access-key=${FOMO_AWS_ACCESS_KEY_ID} --secret-key=${FOMO_AWS_SECRET_ACCESS_KEY} \
     --storage-class ${FOMO_S3_STORAGE_CLASS} --compress lz4 \
-    redis://:${FOMO_REDIS_PW}@${FOMO_HEAD_NODE}:6379 ${FOMO_JUICEID}
+    redis://:${FOMO_REDIS_PW}@${FOMO_HEAD_NODE}:6379/1 ${FOMO_JUICEID}
 juicefs config -y --access-key=${FOMO_AWS_ACCESS_KEY_ID} --secret-key=${FOMO_AWS_SECRET_ACCESS_KEY} \
-    --storage-class ${FOMO_S3_STORAGE_CLASS} --trash-days 0 redis://:${FOMO_REDIS_PW}@${FOMO_HEAD_NODE}:6379
+    --storage-class ${FOMO_S3_STORAGE_CLASS} --trash-days 0 redis://:${FOMO_REDIS_PW}@${FOMO_HEAD_NODE}:6379/1
 mkdir -p ${FOMO_MOUNT_SHR}
 juicefs mount -d --cache-dir ${FOMO_JUICEFS_CACHE} --writeback --cache-size 102400 \
-      redis://:${FOMO_REDIS_PW}@${FOMO_HEAD_NODE}:6379 ${FOMO_MOUNT_SHR} # --max-uploads 100 --cache-partial-only
+      redis://:${FOMO_REDIS_PW}@${FOMO_HEAD_NODE}:6379/1 ${FOMO_MOUNT_SHR} # --max-uploads 100 --cache-partial-only
 #chown {self.cfg.defuser} /mnt/share       
 #juicefs destroy -y redis://localhost:6379 {juiceid}
 #sed -i 's/--access-key=[^ ]*/--access-key=xxx /' {bscript}
