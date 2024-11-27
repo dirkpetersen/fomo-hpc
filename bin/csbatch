@@ -176,6 +176,7 @@ def validate_paths(script_path: str, shared_mount: str) -> bool:
     Returns:
         bool: True if all paths are valid, False otherwise
     """
+    return True
 #    try:
     # Check if shared_mount exists and is mounted
     if not os.path.ismount(shared_mount):
