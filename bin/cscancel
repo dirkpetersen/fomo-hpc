@@ -7,7 +7,11 @@
 import os
 import sys
 import boto3
+import traceback
 from datetime import datetime
+
+# Get debug setting from environment
+DEBUG = os.getenv('FOMO_DEBUG', '').lower() == 'true'
 
 class EnvConfig:
     def __init__(self, filepath):
@@ -175,7 +179,8 @@ def get_instances_by_user(username: str) -> list:
         sys.exit(1)
 
 if __name__ == "__main__":
-    import argparse
+    try:
+        import argparse
     
     parser = argparse.ArgumentParser(description='Cancel running jobs')
     group = parser.add_mutually_exclusive_group(required=True)
@@ -194,9 +199,14 @@ if __name__ == "__main__":
             parser.print_help()
             sys.exit(1)
         instance_ids = args.instance_ids
-    for instance_id in instance_ids:
-        if not instance_id.startswith('i-'):
-            print(f"Error: Invalid instance ID format for '{instance_id}'. Must start with 'i-'")
-            continue
-            
-        terminate_instance(instance_id)
+        for instance_id in instance_ids:
+            if not instance_id.startswith('i-'):
+                print(f"Error: Invalid instance ID format for '{instance_id}'. Must start with 'i-'")
+                continue
+                
+            terminate_instance(instance_id)
+    except Exception as e:
+        print(f"Error: {e}")
+        if DEBUG:
+            traceback.print_exc()
+        sys.exit(1)

@@ -7,7 +7,11 @@
 import os
 import sys
 import boto3
+import traceback
 from datetime import datetime
+
+# Get debug setting from environment
+DEBUG = os.getenv('FOMO_DEBUG', '').lower() == 'true'
 
 class EnvConfig:
     def __init__(self, filepath):
@@ -188,4 +192,10 @@ def list_running_jobs():
         sys.exit(1)
 
 if __name__ == "__main__":
-    list_running_jobs()
+    try:
+        list_running_jobs()
+    except Exception as e:
+        print(f"Error: {e}")
+        if DEBUG:
+            traceback.print_exc()
+        sys.exit(1)

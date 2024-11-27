@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import argparse
+import traceback
 import re
 import subprocess
 import warnings
@@ -176,54 +177,57 @@ def validate_paths(script_path: str, shared_mount: str) -> bool:
     Returns:
         bool: True if all paths are valid, False otherwise
     """
-    return True
-#    try:
-    # Check if shared_mount exists and is mounted
-    if not os.path.ismount(shared_mount):
-        print(f"Error: {shared_mount} is not mounted")
-        print("Please ensure the JuiceFS filesystem is properly mounted at this location")
-        return False
-
-    # Check if it's a JuiceFS mount
     try:
-        with open('/proc/mounts', 'r') as f:
-            mounts = f.read()
-            mount_type = None
-            for line in mounts.splitlines():
-                if shared_mount in line:
-                    mount_type = line.split()[2]
-                    break
-            
-            if mount_type != 'fuse.juicefs':
-                print(f"Error: {shared_mount} is not mounted as a JuiceFS filesystem")
-                print("The shared mount must be a JuiceFS filesystem")
-                print("Current mount type:", mount_type)
-                return False
-    except Exception as e:
-        print(f"Error checking mount type: {e}")
-        return False
-
-    with open(script_path, 'r') as f:
-        script_content = f.read()
-        
-    # Get the real path of the shared mount
-    shared_mount_path = os.path.realpath(shared_mount)
-    
-    # Analyze the script
-    analysis = analyze_text(script_content)
-    
-    # Check each existing path
-    for path in analysis['existing_paths']:
-        real_path = os.path.realpath(path)
-        if not real_path.startswith(shared_mount_path):
-            print(f"Error: Path '{path}' is outside of shared mount {shared_mount}")
+    # Check if shared_mount exists and is mounted
+        if not os.path.ismount(shared_mount):
+            print(f"Error: {shared_mount} is not mounted")
+            print("Please ensure the JuiceFS filesystem is properly mounted at this location")
             return False
+
+        # Check if it's a JuiceFS mount
+        try:
+            with open('/proc/mounts', 'r') as f:
+                mounts = f.read()
+                mount_type = None
+                for line in mounts.splitlines():
+                    if shared_mount in line:
+                        mount_type = line.split()[2]
+                        break
+                
+                if mount_type != 'fuse.juicefs':
+                    print(f"Error: {shared_mount} is not mounted as a JuiceFS filesystem")
+                    print("The shared mount must be a JuiceFS filesystem")
+                    print("Current mount type:", mount_type)
+                    return False
+        except Exception as e:
+            print(f"Error checking mount type: {e}")
+            if DEBUG:
+                traceback.print_exc()
+            return False
+
+        with open(script_path, 'r') as f:
+            script_content = f.read()
             
-    return True
-    
-#    except Exception as e:
-#        print(f"Error validating paths: {e}")
-#        return False
+        # Get the real path of the shared mount
+        shared_mount_path = os.path.realpath(shared_mount)
+        
+        # Analyze the script
+        analysis = analyze_text(script_content)
+        
+        # Check each existing path
+        for path in analysis['existing_paths']:
+            real_path = os.path.realpath(path)
+            if not real_path.startswith(shared_mount_path):
+                print(f"Error: Path '{path}' is outside of shared mount {shared_mount}")
+                return False
+                
+        return True
+        
+    except Exception as e:
+        print(f"Error validating paths: {e}")
+        if DEBUG:
+            traceback.print_exc()        
+        return False
 
 def parse_arguments():
     """Parse command line arguments similar to sbatch"""
@@ -372,6 +376,8 @@ class EnvConfig:
             print(f"Error: File {self.filepath} not found")
         except Exception as e:
             print(f"Error reading file: {e}")
+            if DEBUG:
+                traceback.print_exc()
 
     def reload(self):
         """Reload the configuration from the file."""
@@ -1126,7 +1132,9 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
                     print(f"Terminated instance {instance_id}")
                 except Exception as e:
                     print(f"Error terminating instance: {e}")
-            sys.exit(1)
+                    if DEBUG:
+                        traceback.print_exc()
+                    sys.exit(1)
         
         instance = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
         public_ip = instance.get('PublicIpAddress')
@@ -1154,6 +1162,9 @@ def launch_ec2_instance(cloud_init_path: str, resources: Dict[str, Any], env_con
     except ClientError as e:
         print(f"Error launching EC2 instance: {e}")
         sys.exit(1)
+
+# Get debug setting from environment
+DEBUG = os.getenv('FOMO_DEBUG', '').lower() == 'true'
 
 if __name__ == "__main__":
     instance_id = None
@@ -1269,6 +1280,8 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         print(f"\nError: {e}")
+        if DEBUG:
+            traceback.print_exc()
         if instance_id:
             try:
                 ec2_client = boto3.client('ec2')
