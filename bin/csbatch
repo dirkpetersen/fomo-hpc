@@ -176,53 +176,53 @@ def validate_paths(script_path: str, shared_mount: str) -> bool:
     Returns:
         bool: True if all paths are valid, False otherwise
     """
-    try:
-        # Check if shared_mount exists and is mounted
-        if not os.path.ismount(shared_mount):
-            print(f"Error: {shared_mount} is not mounted")
-            print("Please ensure the JuiceFS filesystem is properly mounted at this location")
-            return False
-
-        # Check if it's a JuiceFS mount
-        try:
-            with open('/proc/mounts', 'r') as f:
-                mounts = f.read()
-                mount_type = None
-                for line in mounts.splitlines():
-                    if shared_mount in line:
-                        mount_type = line.split()[2]
-                        break
-                
-                if mount_type != 'fuse.juicefs':
-                    print(f"Error: {shared_mount} is not mounted as a JuiceFS filesystem")
-                    print("The shared mount must be a JuiceFS filesystem")
-                    print("Current mount type:", mount_type)
-                    return False
-        except Exception as e:
-            print(f"Error checking mount type: {e}")
-            return False
-
-        with open(script_path, 'r') as f:
-            script_content = f.read()
-            
-        # Get the real path of the shared mount
-        shared_mount_path = os.path.realpath(shared_mount)
-        
-        # Analyze the script
-        analysis = analyze_text(script_content)
-        
-        # Check each existing path
-        for path in analysis['existing_paths']:
-            real_path = os.path.realpath(path)
-            if not real_path.startswith(shared_mount_path):
-                print(f"Error: Path '{path}' is outside of shared mount {shared_mount}")
-                return False
-                
-        return True
-        
-    except Exception as e:
-        print(f"Error validating paths: {e}")
+#    try:
+    # Check if shared_mount exists and is mounted
+    if not os.path.ismount(shared_mount):
+        print(f"Error: {shared_mount} is not mounted")
+        print("Please ensure the JuiceFS filesystem is properly mounted at this location")
         return False
+
+    # Check if it's a JuiceFS mount
+    try:
+        with open('/proc/mounts', 'r') as f:
+            mounts = f.read()
+            mount_type = None
+            for line in mounts.splitlines():
+                if shared_mount in line:
+                    mount_type = line.split()[2]
+                    break
+            
+            if mount_type != 'fuse.juicefs':
+                print(f"Error: {shared_mount} is not mounted as a JuiceFS filesystem")
+                print("The shared mount must be a JuiceFS filesystem")
+                print("Current mount type:", mount_type)
+                return False
+    except Exception as e:
+        print(f"Error checking mount type: {e}")
+        return False
+
+    with open(script_path, 'r') as f:
+        script_content = f.read()
+        
+    # Get the real path of the shared mount
+    shared_mount_path = os.path.realpath(shared_mount)
+    
+    # Analyze the script
+    analysis = analyze_text(script_content)
+    
+    # Check each existing path
+    for path in analysis['existing_paths']:
+        real_path = os.path.realpath(path)
+        if not real_path.startswith(shared_mount_path):
+            print(f"Error: Path '{path}' is outside of shared mount {shared_mount}")
+            return False
+            
+    return True
+    
+#    except Exception as e:
+#        print(f"Error validating paths: {e}")
+#        return False
 
 def parse_arguments():
     """Parse command line arguments similar to sbatch"""
